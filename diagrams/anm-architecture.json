@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "anm 技术流程架构图",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "dual-entry", "label": "人机双入口", "focus": ["user", "cli", "anw", "agent", "mcp", "core", "notes"], "note": "用户与 agent 分别经 CLI / MCP 访问同一份笔记数据。" },
+      { "id": "index-loop", "label": "守护进程与索引", "focus": ["daemon", "notes", "anm-dir", "core"], "note": "daemon 监听笔记变动、重建索引并落盘。" },
+      { "id": "windows-shell", "label": "Windows 薄壳", "focus": ["tray", "daemon"], "note": "托盘经 TCP 连接 WSL 内的守护进程（规划中）。" }
+    ]
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "用户", "sublabel": "Shell / 终端 / 编辑器", "pos": [20, 150], "size": [140, 64] },
+    { "id": "agent", "type": "external", "label": "AI Agent", "sublabel": "MCP 客户端", "pos": [20, 400], "size": [140, 64] },
+    { "id": "tray", "type": "frontend", "label": "anm-tray", "sublabel": "Windows 托盘 · 规划中", "pos": [1330, 260], "size": [160, 60] },
+    { "id": "cli", "type": "frontend", "label": "anm CLI", "sublabel": "查询 · 标签 · 补全 · TUI", "pos": [300, 90], "size": [180, 72] },
+    { "id": "anw", "type": "frontend", "label": "anw", "sublabel": "快速写入 skatch.md", "pos": [300, 220], "size": [180, 60] },
+    { "id": "mcp", "type": "backend", "label": "anm-mcp", "sublabel": "MCP Server（薄壳）", "pos": [300, 380], "size": [180, 72] },
+    { "id": "core", "type": "backend", "label": "anm-core", "sublabel": "全部逻辑（lib）", "pos": [640, 210], "size": [210, 92] },
+    { "id": "notes", "type": "database", "label": "笔记目录", "sublabel": "文件夹 + 文本文件", "pos": [990, 70], "size": [210, 92] },
+    { "id": "daemon", "type": "backend", "label": "anm-daemon", "sublabel": "常驻 · 监听 · IPC", "pos": [990, 250], "size": [210, 92] },
+    { "id": "anm-dir", "type": "database", "label": "~/.anm", "sublabel": "config.toml · index.jsonl", "pos": [990, 450], "size": [210, 92] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Linux / WSL", "wraps": ["cli", "anw", "mcp", "core", "notes", "anm-dir", "daemon"] },
+    { "kind": "region", "label": "Windows（薄壳）", "wraps": ["tray"] }
+  ],
+  "connections": [
+    { "id": "user-to-cli", "from": "user", "to": "cli", "label": "命令 · Tab 补全", "variant": "emphasis" },
+    { "id": "user-to-anw", "from": "user", "to": "anw", "label": "快速记一笔" },
+    { "id": "cli-to-core", "from": "cli", "to": "core", "label": "调用核心逻辑" },
+    { "id": "anw-to-core", "from": "anw", "to": "core", "label": "inbox 追加", "labelAt": [520, 250] },
+    { "id": "agent-to-mcp", "from": "agent", "to": "mcp", "label": "MCP · JSON-RPC 2.0（stdio）", "variant": "emphasis" },
+    { "id": "mcp-to-core", "from": "mcp", "to": "core", "label": "8 个工具调用" },
+    { "id": "core-to-notes", "from": "core", "to": "notes", "label": "扫描 · 读写笔记" },
+    { "id": "core-to-anm-dir", "from": "core", "to": "anm-dir", "label": "配置读写", "fromSide": "bottom", "toSide": "left" },
+    { "id": "daemon-to-notes", "from": "daemon", "to": "notes", "label": "notify 递归监听" },
+    { "id": "daemon-to-anm-dir", "from": "daemon", "to": "anm-dir", "label": "index.jsonl 落盘", "labelDy": 26 },
+    { "id": "daemon-to-core", "from": "daemon", "to": "core", "label": "build_index 重建索引" },
+    { "id": "tray-to-daemon", "from": "tray", "to": "daemon", "label": "TCP :17370", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "人机双入口", "items": ["人对同一份数据经 CLI / anw 操作", "AI agent 经 MCP 操作（记忆总线）", "二者共享 anm-core 与同一持久层"] },
+    { "dot": "emerald", "title": "核心与薄壳", "items": ["所有逻辑集中于 anm-core（lib）", "CLI / MCP / daemon / anw / tray 均为薄壳", "标签行 @xxx 识别 + 头部标签区同步"] },
+    { "dot": "amber", "title": "守护与索引", "items": ["daemon 经 notify 递归监听，500ms 防抖后重建索引", "反向索引落盘 ~/.anm/index.jsonl", "非唯一入口：daemon 只观察、不拦截外部修改"] }
+  ]
+}

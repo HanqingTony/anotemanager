@@ -1,0 +1,15 @@
+[package]
+name = "anm-daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "anm-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anm-core = { path = "../anm-core" }
+anyhow.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true

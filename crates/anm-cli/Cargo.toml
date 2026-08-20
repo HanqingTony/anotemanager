@@ -1,0 +1,18 @@
+[package]
+name = "anm-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "anm"
+path = "src/main.rs"
+
+[[bin]]
+name = "anw"
+path = "src/bin/anw.rs"
+
+[dependencies]
+anm-core = { path = "../anm-core" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true

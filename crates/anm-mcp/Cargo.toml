@@ -1,0 +1,14 @@
+[package]
+name = "anm-mcp"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "anm-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anm-core = { path = "../anm-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
