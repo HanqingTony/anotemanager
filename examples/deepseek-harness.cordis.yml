@@ -1,0 +1,23 @@
+# 把 anm-mcp 接入 DeepSeek Harness（官方 MCP 客户端插件 @deepseek-ai/dsh-mcp-client）
+#
+# 启用方式（二选一）：
+#   1. 临时：dsh web --patch "$PWD/examples/deepseek-harness.cordis.yml"
+#   2. 持久：把下面的 insert 条目合并进 $DSH_HOME/profiles/<name>/cordis.patch.yml
+#      （追加到文件末尾的 insert 列表，不要覆盖已有内容）
+#
+# 生效后 agent 会看到 mcp__anm__<tool> 系列工具：
+#   mcp__anm__ls_dirs / list_tags / find_tag / search / search_content / read_note
+#   / list / recent / new / write_inbox / tag_sync / tag_add / open
+#
+# 前置条件：已 `anm init <笔记库根目录>`（生成 ~/.anm/config.toml）。
+# stdio 桥接会保留 HOME 等环境变量，anm-mcp 据此找到配置。
+# 需要重启 dsh（或等 HMR 重连）后工具才注册；命令路径可按安装位置调整。
+- insert:
+    - id: mcp-anm
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: anm
+        transport: stdio
+        command: /home/tony/zrepo/anotemanager/target/debug/anm-mcp
+        args: ["--stdio"]
+        cwd: !!js process.cwd()

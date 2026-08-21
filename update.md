@@ -4,6 +4,106 @@
 
 ---
 
+## 2026-08-20 — 接入 DeepSeek Harness
+
+### 完成
+
+- 新增 [examples/deepseek-harness.cordis.yml](examples/deepseek-harness.cordis.yml)：
+  通过 harness 官方 MCP 客户端插件 `@deepseek-ai/dsh-mcp-client` 接入 anm-mcp（stdio），
+  agent 获得 `mcp__anm__<tool>` 系列工具。
+- 本机已应用：`~/.dsh/profiles/web/cordis.patch.yml` 追加 insert 条目
+  （`serverName: anm`，`command: anm-mcp`，`args: ["--stdio"]`）。
+- 真实环境初始化：`anm init /home/tony/znote`（root 经 canonicalize 解析为
+  `/mnt/c/Users/hanqi/OneDrive/znote`——znote 是 OneDrive 的符号链接）。
+
+### 验证
+
+- `anm-mcp --stdio` 在真实 HOME 下 initialize + ls_dirs 正常（列出 znote 14 个一级目录）。
+- patch 结构与官方 mcp 示例一致。
+- 生效方式：重启 `dsh web`（或等待 HMR 重连）后，`mcp__anm__*` 工具注册到 agent 工具表。
+
+---
+
+## 2026-08-20 — MCP 参数入配置，默认本地 HTTP
+
+### 完成
+
+- **配置系统**（anm-core）：`config.toml` 新增 `[mcp]` 段：`transport`（http | stdio）、`host`、`port`。
+  - 默认：`http` / `127.0.0.1` / `17371`（**默认就是本地 HTTP**）；
+  - `anm init` 自动写入该段；老配置文件缺 `[mcp]` 段时回退到默认值（向后兼容）。
+- **anm-mcp 启动优先级**：显式 CLI 标志（`--stdio` / `--http` / `--host` / `--port`）> 配置 `[mcp]` 段 > 默认。
+  - `anm_mcp`（无参数）→ 本地 HTTP（配置默认，端点 `/mcp`）；
+  - `anm_mcp --stdio` → stdio（供 Claude Desktop / Cursor / opencode spawn）；
+  - `anm_mcp --http --host H --port P` → 临时覆盖。
+
+### 验证
+
+- 单测：anm-core 35 个、anm-mcp 7 个全部通过（含 `[mcp]` 段解析回退、resolve_mode 优先级矩阵）。
+- 端到端：`anm init` 生成带 `[mcp]` 的配置；无参数启动监听 `127.0.0.1:17371`（curl initialize 200）；
+  配置 `transport = "stdio"` 后无参数启动走 stdio（initialize 正常响应）。
+
+### 说明
+
+- stdio 不再是默认；依赖 spawn 方式的客户端需要 `--stdio` 或配置 `transport = "stdio"`。
+
+---
+
+## 2026-08-20 — MCP 迁移到官方 rmcp：stdio + Streamable HTTP 双传输
+
+### 背景
+
+MCP 首版为手写 JSON-RPC over stdio。本次按设计方向切换到官方 [rmcp](https://github.com/modelcontextprotocol/rust-sdk)（v3.1.4），
+并增加 MCP 标准 **Streamable HTTP** 传输（`POST /mcp` / `GET /mcp`(SSE) / `DELETE /mcp`）。
+
+### 完成
+
+- **传输**：
+  - `anm-mcp`（无参数）→ stdio，行为与旧版兼容；
+  - `anm-mcp --http [--host H] [--port P]` → Streamable HTTP，默认绑定 `127.0.0.1:17371`，端点 `/mcp`；
+  - `--host` 绑定非回环地址时需自行配合防火墙/鉴权（默认 `allowed_hosts` 仅回环，防 DNS rebinding）。
+- **工具**：13 个工具全部迁移到 `#[tool]` 宏体系（参数结构 → 自动生成 JSON Schema 与参数校验）；
+  安全边界原样保留（路径白名单、只读优先、`read_note` 限长截断）。
+- **协议**：由 rmcp 承担握手、协议版本协商、会话管理、SSE 流式等，不再手写。
+- 依赖：`rmcp`（client/server/macros/schemars + transport-io + transport-streamable-http-server）、`axum`、`schemars`、`tokio`。
+
+### 验证
+
+- 单测：anm-core 32 个、anm-mcp 2 个（工具注册表合法性 + 进程内握手/tools/list）全部通过。
+- stdio 端到端：initialize → tools/list（13 工具）→ 越界拒绝 → search_content → new → recent。
+- HTTP 端到端（curl/python）：initialize（拿 session-id）→ initialized 通知 → tools/list → tools/call（越界拒绝 + 正常调用）→ DELETE 会话，全链路通过。
+
+### 说明
+
+- HTTP 打破「数据不出本地」原原则：本机默认 `127.0.0.1` 仍满足本地语义；远程暴露需自行加鉴权与 TLS。
+- rmcp 自动协商协议版本；工具错误走 `CallToolResult::error`（isError），协议错误走标准 JSON-RPC error。
+
+---
+
+## 2026-08-20 — MCP Server 补全：路径白名单 + 5 个新工具 + 协议硬化
+
+### 完成
+
+- **anm-core**：
+  - `path`（新模块）：路径白名单。`resolve_file_in_root`（canonicalize + starts_with，防目录穿越、防符号链接逃逸）、`resolve_new_in_root`（词法校验，供尚未存在的目标路径）、`resolve_dir_in_root`（目录校验）。
+  - `query`：`search_content`（全文搜索，返回 `[{file, snippet, score}]`，按命中次数降序、可限条数）、`list_in_dir`（目录下笔记列表，非递归）、`recent`（最近修改 n 条，含 mtime）、公开 `is_note_path`（笔记扩展名校验）。
+  - `notes`（新模块）：`create_note`（新建笔记：目录白名单校验、标题清洗防路径逃逸、已存在绝不覆盖、缺省生成标题行）。
+- **anm-mcp**：工具从 8 个扩到 13 个（新增 `search_content` / `list` / `recent` / `new` / `open`）。
+  - **安全边界落地**：`read_note` / `tag_sync` / `tag_add` / `new` / `list` 的路径参数全部经 `anm_core::path` 校验，仅允许笔记库内；`read_note` / 标签操作仅接受笔记文件（.md / .markdown / .txt）。
+  - `read_note` 限长截断（默认 8000 字符，返回 `truncated` / `total_chars`），防 agent 上下文爆炸。
+  - JSON-RPC 硬化：未知方法返回标准 error（-32601）；无 id 的消息按 notification 处理、不回响应。
+
+### 验证
+
+- 单测：anm-core 32 个、anm-mcp 7 个全部通过（含越界路径拒绝、截断、新建 + 列表 + 全文搜索、协议错误码、notification 静默）。
+- stdio 端到端冒烟通过：initialize → tools/list（13 工具）→ 越界 `/etc/passwd` 拒绝 → read_note 截断 → search_content 命中 → new → recent → list → open → 未知方法 error。
+
+### 说明
+
+- `open` 工具在 stdio 会话下仅适用于能独立开窗的编辑器（如 GUI 编辑器）；终端编辑器无法从 MCP 进程拉起交互界面。
+- 下一步（roadmap 未变）：CLI / MCP 接入 daemon（TCP 优先、失败回退本地扫描）。
+
+---
+
 ## 2026-08-19 — Shell 补全（F 决策落地）
 
 ### 完成

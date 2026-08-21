@@ -34,6 +34,12 @@ fn is_note_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 判断路径是否指向一篇笔记文件（扩展名在 `NOTE_EXTENSIONS` 内且非隐藏文件）。
+/// 供 MCP / daemon 等入口在路径白名单之上做「只读笔记」的二次校验。
+pub fn is_note_path(path: &Path) -> bool {
+    is_note_file(path)
+}
+
 /// 递归扫描笔记系统中的所有笔记文件（跳过隐藏目录）
 pub fn scan_notes(root: &Path) -> Result<Vec<PathBuf>> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -111,6 +117,128 @@ pub fn all_tags(root: &Path) -> Result<Vec<String>> {
     Ok(set)
 }
 
+/// 全文检索命中
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ContentHit {
+    /// 绝对路径
+    pub file: PathBuf,
+    /// 命中上下文片段
+    pub snippet: String,
+    /// 命中次数（排序依据）
+    pub score: usize,
+}
+
+/// 全文搜索：对笔记正文做大小写不敏感的子串匹配。
+///
+/// 返回按命中次数降序排列、截断到 `limit` 条的结果；
+/// 每条附一段包含首个命中的上下文片段（供 agent 判断相关性，避免整库灌入上下文）。
+pub fn search_content(root: &Path, keyword: &str, limit: usize) -> Result<Vec<ContentHit>> {
+    let kw = keyword.trim().to_lowercase();
+    if kw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut hits = Vec::new();
+    for path in scan_notes(root)? {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let lower = content.to_lowercase();
+        let score = lower.matches(&kw).count();
+        if score == 0 {
+            continue;
+        }
+        hits.push(ContentHit {
+            file: path,
+            snippet: make_snippet(&content, &lower, &kw),
+            score,
+        });
+    }
+    hits.sort_by(|a, b| b.score.cmp(&a.score));
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+/// 生成包含首个命中的上下文片段（每侧约 40 字符，截断处加省略号）
+fn make_snippet(content: &str, lower: &str, kw: &str) -> String {
+    const HALF: usize = 40;
+    let start = match lower.find(kw) {
+        Some(i) => i,
+        None => return content.chars().take(HALF * 2).collect(),
+    };
+    let (before, _) = content.split_at(start);
+    let before_count = before.chars().count();
+    let lead = before_count.saturating_sub(HALF);
+    let s: String = content.chars().skip(lead).take(HALF * 2 + kw.len()).collect();
+    let mut out = String::new();
+    if lead > 0 {
+        out.push('…');
+    }
+    out.push_str(&s);
+    if content.chars().count() > lead + HALF * 2 + kw.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// 列出某目录下直接包含的笔记文件（非递归），按文件名排序。
+pub fn list_in_dir(root: &Path, rel_dir: &str) -> Result<Vec<NoteInfo>> {
+    let dir = crate::path::resolve_dir_in_root(root, rel_dir)?;
+    let mut out = Vec::new();
+    let rd = std::fs::read_dir(&dir)
+        .map_err(|e| anyhow!("读取目录 {} 失败: {e}", dir.display()))?;
+    for entry in rd {
+        let entry = entry.map_err(|e| anyhow!("读取目录项失败: {e}"))?;
+        let p = entry.path();
+        if !is_note_file(&p) {
+            continue;
+        }
+        let title = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let tags = match std::fs::read_to_string(&p) {
+            Ok(content) => tags::extract_tags(&content),
+            Err(_) => Vec::new(),
+        };
+        out.push(NoteInfo { path: p, title, tags });
+    }
+    out.sort_by(|a, b| a.title.cmp(&b.title));
+    Ok(out)
+}
+
+/// 最近修改的笔记条目
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecentNote {
+    /// 绝对路径
+    pub path: PathBuf,
+    /// 标题：文件名（去扩展名）
+    pub title: String,
+    /// 标签
+    pub tags: Vec<String>,
+    /// 最后修改时间（Unix 秒）
+    pub modified: u64,
+}
+
+/// 按最后修改时间取最近的 n 条笔记（时间新者在前）。
+pub fn recent(root: &Path, n: usize) -> Result<Vec<RecentNote>> {
+    let mut notes = Vec::new();
+    for path in scan_notes(root)? {
+        let modified = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let title = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let tags = match std::fs::read_to_string(&path) {
+            Ok(content) => tags::extract_tags(&content),
+            Err(_) => Vec::new(),
+        };
+        notes.push(RecentNote { path, title, tags, modified });
+    }
+    notes.sort_by(|a, b| b.modified.cmp(&a.modified));
+    notes.truncate(n);
+    Ok(notes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +280,69 @@ mod tests {
         let root = make_root("tags");
         let tags = all_tags(&root).unwrap();
         assert_eq!(tags, vec!["ai", "翻译"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn searches_content() {
+        let root = make_root("content");
+        std::fs::write(root.join("ideas/note-a.md"), "@ai\n\n# A\n中文正文 contains 关键词\n").unwrap();
+        std::fs::write(root.join("ideas/note-b.md"), "@ai\n\n# B\n另一篇无关\n").unwrap();
+        let hits = search_content(&root, "关键词", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].file.ends_with("note-a.md"));
+        assert!(hits[0].snippet.contains("关键词"));
+        assert_eq!(hits[0].score, 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn search_content_respects_limit_and_score() {
+        let root = make_root("score");
+        std::fs::write(root.join("a.md"), "重复 重复 重复 重复 词\n").unwrap();
+        std::fs::write(root.join("b.md"), "词\n").unwrap();
+        let hits = search_content(&root, "词", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].file.ends_with("a.md")); // score 高者在前
+        let limited = search_content(&root, "词", 1).unwrap();
+        assert_eq!(limited.len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn lists_dir_notes_non_recursive() {
+        let root = make_root("listdir");
+        std::fs::create_dir_all(root.join("mylist/sub")).unwrap();
+        std::fs::write(root.join("mylist/note-a.md"), "@ai\n").unwrap();
+        std::fs::write(root.join("mylist/note-b.md"), "@ai\n").unwrap();
+        std::fs::write(root.join("mylist/sub/deep.md"), "@ai\n").unwrap();
+        let notes = list_in_dir(&root, "mylist").unwrap();
+        assert_eq!(notes.len(), 2);
+        // 拒绝越界目录
+        assert!(list_in_dir(&root, "../..").is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn recent_sorts_by_mtime() {
+        // 独立根目录（不用夹具），全部文件显式设置 mtime，避免时间粒度与夹具干扰
+        let root = std::env::temp_dir()
+            .join(format!("anm-query-recent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["a.md", "b.md", "c.md"] {
+            std::fs::write(root.join(name), format!("# {name}\n")).unwrap();
+        }
+        for (name, secs) in [("a.md", 100u64), ("b.md", 200), ("c.md", 300)] {
+            let f = std::fs::OpenOptions::new().write(true).open(root.join(name)).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+            drop(f);
+        }
+        let notes = recent(&root, 2).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].title, "c");
+        assert_eq!(notes[1].title, "b");
+        assert!(notes[0].modified >= notes[1].modified);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -5,6 +5,8 @@
 pub mod config;
 pub mod inbox;
 pub mod index;
+pub mod notes;
+pub mod path;
 pub mod query;
 pub mod tags;
 pub mod tree;
