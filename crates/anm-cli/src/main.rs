@@ -1,4 +1,11 @@
-//! anm：通用笔记系统管理器（CLI）。
+//! anm：anm-core 服务的 CLI 客户端（人机接口，一核心三应用之一）。
+//!
+//! 查询 / 写入子命令全部经 IPC 转发给常驻的 anm-core 服务（见 [`anm_cli::client`]）；
+//! 只有四个纯本地动作不依赖服务：
+//! - `init`：写 `~/.anm/config.toml`（服务启动前必须做的注册动作）；
+//! - `open`：用配置的编辑器打开笔记（人机交互留在终端侧）；
+//! - `completion`：输出 shell 补全脚本（静态文本）；
+//! - `_dirs` / `_tags`：补全脚本的动态数据源（服务不可用时静默空输出）。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -6,13 +13,16 @@ use std::process::Command;
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use anm_core::{config::Config, inbox, query, tags, tree};
+use anm_core::config::Config;
+use anm_core::protocol::Request;
+
+use anm_cli::client;
 
 #[derive(Parser)]
 #[command(
     name = "anm",
     version,
-    about = "通用笔记系统管理器：标签、查询、浏览、inbox"
+    about = "anm-core 服务的 CLI 客户端：标签、查询、浏览、inbox"
 )]
 struct Cli {
     /// 机器可读输出（JSON）
@@ -25,7 +35,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum AnmCommand {
-    /// 初始化 / 注册笔记系统
+    /// 初始化 / 注册笔记系统（本地写配置，需随后启动 anm-core 服务）
     Init(InitArgs),
     /// 显示笔记系统的一级目录（无参数时 `anm` 也显示）
     Ls,
@@ -42,7 +52,7 @@ enum AnmCommand {
     },
     /// 快速写入默认 skatch.md
     Inbox { text: String },
-    /// 用配置的编辑器打开笔记
+    /// 用配置的编辑器打开笔记（本地动作）
     Open { path: PathBuf },
     /// 生成 shell 补全脚本
     Completion { shell: CompletionShell },
@@ -73,12 +83,13 @@ struct InitArgs {
 
 #[derive(Subcommand)]
 enum TagCommand {
-    /// 同步文件头部标签区（把文档中标签行统一维护到头部）
-    Sync { path: PathBuf },
-    /// 为文件添加标签并同步头部标签区
+    /// 将文件的标签行移动到文档开头（纯位置整理，不改变标签内容）
+    Move { path: PathBuf },
+    /// 为文件新增标签（仅追加新标签行，不改动已有标签行）
     Add { path: PathBuf, tags: Vec<String> },
 }
 
+/// 程序入口：解析子命令并分发到本地动作或 IPC 请求；出错时打印并退出非零。
 fn main() {
     if let Err(e) = run() {
         eprintln!("anm: {e:#}");
@@ -86,6 +97,7 @@ fn main() {
     }
 }
 
+/// 程序入口：解析子命令并分发到本地动作或 IPC 请求。
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let json = cli.json;
@@ -98,7 +110,7 @@ fn run() -> Result<()> {
         Some(AnmCommand::Search { keyword }) => cmd_search(json, &keyword),
         Some(AnmCommand::Tags) => cmd_tags(json),
         Some(AnmCommand::Tag { cmd }) => match cmd {
-            TagCommand::Sync { path } => cmd_tag_sync(&path),
+            TagCommand::Move { path } => cmd_tag_move(&path),
             TagCommand::Add { path, tags } => cmd_tag_add(&path, &tags),
         },
         Some(AnmCommand::Inbox { text }) => cmd_inbox(&text),
@@ -109,87 +121,102 @@ fn run() -> Result<()> {
     }
 }
 
-/// 裸 `anm`：显示一级目录（TUI 后续接入）
+/// 裸 `anm`：显示一级目录（TUI / 面板后续接入）。
 fn cmd_default(json: bool) -> Result<()> {
-    let cfg = match Config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            eprintln!("提示：先运行 `anm init <笔记系统根目录>` 注册笔记系统");
-            std::process::exit(1);
-        }
-    };
-    print_dirs(json, &cfg)
+    let cfg = Config::load()?;
+    let data = client::call(&cfg, &Request::Dirs)?;
+    print_dirs(json, &cfg, &data)
 }
 
+/// 注册笔记系统：本地写配置，然后提示启动服务。
 fn cmd_init(args: &InitArgs) -> Result<()> {
     let cfg = Config::init(&args.root, &args.editor)?;
     println!("已注册笔记系统: {}", cfg.root.display());
     println!("配置文件: {}", cfg.config_path.display());
     println!("skatch.md: {}", cfg.skatch.display());
+    println!("提示：启动常驻服务 `anm-core` 后，anm / anw 才能访问笔记库。");
     Ok(())
 }
 
+/// 列出笔记系统一级目录（经 IPC）。
 fn cmd_ls(json: bool) -> Result<()> {
     let cfg = Config::load()?;
-    print_dirs(json, &cfg)
+    let data = client::call(&cfg, &Request::Dirs)?;
+    print_dirs(json, &cfg, &data)
 }
 
-fn print_dirs(json: bool, cfg: &Config) -> Result<()> {
-    let dirs = tree::list_top_dirs(&cfg.root)?;
+/// 打印一级目录：JSON 原样输出；人类可读时列出"名称 + 路径"。
+fn print_dirs(json: bool, cfg: &Config, data: &serde_json::Value) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&dirs)?);
+        println!("{}", serde_json::to_string_pretty(data)?);
     } else {
         println!("{}", cfg.root.display());
+        let dirs = data.as_array().ok_or_else(|| anyhow!("服务返回格式异常"))?;
         if dirs.is_empty() {
             println!("（空）");
         }
-        for d in &dirs {
-            println!("  {}  {}", d.name, d.path.display());
+        for d in dirs {
+            println!("  {}  {}", d["name"], d["path"]);
         }
     }
     Ok(())
 }
 
+/// 按标签查找笔记（任一命中；经 IPC）。
 fn cmd_find(json: bool, tags: &[String]) -> Result<()> {
     let cfg = Config::load()?;
-    let notes = query::find_by_tag(&cfg.root, tags)?;
-    print_notes(json, &notes)
+    let data = client::call(&cfg, &Request::FindTag { tags: tags.to_vec() })?;
+    print_notes(json, &data)
 }
 
+/// 按标题 / 文件名关键字查找笔记（经 IPC）。
 fn cmd_search(json: bool, keyword: &str) -> Result<()> {
     let cfg = Config::load()?;
-    let notes = query::find_by_title(&cfg.root, keyword)?;
-    print_notes(json, &notes)
+    let data = client::call(&cfg, &Request::Search { keyword: keyword.to_string() })?;
+    print_notes(json, &data)
 }
 
-fn print_notes(json: bool, notes: &[query::NoteInfo]) -> Result<()> {
+/// 打印笔记列表：JSON 原样输出；人类可读时列出"路径 + [标签]"。
+fn print_notes(json: bool, data: &serde_json::Value) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(notes)?);
+        println!("{}", serde_json::to_string_pretty(data)?);
     } else {
+        let notes = data.as_array().ok_or_else(|| anyhow!("服务返回格式异常"))?;
         if notes.is_empty() {
             println!("（无匹配）");
         }
         for n in notes {
-            let tag_str = if n.tags.is_empty() {
+            let tags = n["tags"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let tag_str = if tags.is_empty() {
                 String::new()
             } else {
-                format!("  [{}]", n.tags.join(", "))
+                format!("  [{tags}]")
             };
-            println!("{}{}", n.path.display(), tag_str);
+            println!("{}{}", n["path"], tag_str);
         }
     }
     Ok(())
 }
 
+/// 列出系统中所有标签（去重排序；经 IPC）。
 fn cmd_tags(json: bool) -> Result<()> {
     let cfg = Config::load()?;
-    let tags = query::all_tags(&cfg.root)?;
+    let data = client::call(&cfg, &Request::Tags)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&tags)?);
-    } else if tags.is_empty() {
-        println!("（无标签）");
+        println!("{}", serde_json::to_string_pretty(&data)?);
     } else {
+        let tags = data.as_array().ok_or_else(|| anyhow!("服务返回格式异常"))?;
+        if tags.is_empty() {
+            println!("（无标签）");
+        }
         for t in tags {
             println!("@{}", t);
         }
@@ -197,39 +224,45 @@ fn cmd_tags(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_tag_sync(path: &std::path::Path) -> Result<()> {
-    if !path.exists() {
-        return Err(anyhow!("文件不存在: {}", path.display()));
-    }
-    let changed = tags::sync_header_file(path)?;
-    if changed {
-        println!("已同步头部标签区: {}", path.display());
+/// 标签行置顶：请求服务对目标笔记做纯位置整理。
+fn cmd_tag_move(path: &std::path::Path) -> Result<()> {
+    let cfg = Config::load()?;
+    let data = client::call(&cfg, &Request::TagMoveTop {
+        path: path.to_string_lossy().to_string(),
+    })?;
+    if data["changed"].as_bool().unwrap_or(false) {
+        println!("标签行已移动到文档开头: {}", data["path"]);
     } else {
-        println!("无需变化: {}", path.display());
+        println!("无需变化: {}", data["path"]);
     }
     Ok(())
 }
 
+/// 新增标签：请求服务只追加不存在的标签行。
 fn cmd_tag_add(path: &std::path::Path, new_tags: &[String]) -> Result<()> {
-    if !path.exists() {
-        return Err(anyhow!("文件不存在: {}", path.display()));
-    }
-    let added = tags::add_tags(path, new_tags)?;
-    if added.is_empty() {
+    let cfg = Config::load()?;
+    let data = client::call(&cfg, &Request::TagAdd {
+        path: path.to_string_lossy().to_string(),
+        tags: new_tags.to_vec(),
+    })?;
+    let added = data["added"].as_array().map(|a| a.len()).unwrap_or(0);
+    if added == 0 {
         println!("标签均已存在，未变化");
     } else {
-        println!("已添加: {}", added.join(", "));
+        println!("已添加: {}", data["added"]);
     }
     Ok(())
 }
 
+/// 快速写入 skatch.md：请求服务追加（本地不直接碰文件）。
 fn cmd_inbox(text: &str) -> Result<()> {
     let cfg = Config::load()?;
-    inbox::append(&cfg.skatch, text)?;
-    println!("已写入 {}", cfg.skatch.display());
+    let data = client::call(&cfg, &Request::InboxAppend { text: text.to_string() })?;
+    println!("已写入 {}", data["skatch"]);
     Ok(())
 }
 
+/// 用配置的编辑器打开笔记（本地动作，不经过服务）。
 fn cmd_open(path: &std::path::Path) -> Result<()> {
     let cfg = Config::load()?;
     if !path.exists() {
@@ -245,7 +278,7 @@ fn cmd_open(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// 输出 shell 补全脚本
+/// 输出 shell 补全脚本（静态文本，本地动作）。
 fn cmd_completion(shell: CompletionShell) -> Result<()> {
     let script = match shell {
         CompletionShell::Bash => BASH_COMPLETION,
@@ -256,23 +289,23 @@ fn cmd_completion(shell: CompletionShell) -> Result<()> {
     Ok(())
 }
 
-/// 输出一级目录名（每行一个），供 shell 补全使用；未初始化时静默空输出
+/// 输出一级目录名（每行一个），供补全脚本调用；服务不可用时静默空输出。
 fn cmd_dirs() -> Result<()> {
     if let Ok(cfg) = Config::load() {
-        if let Ok(dirs) = tree::list_top_dirs(&cfg.root) {
-            for d in dirs {
-                println!("{}", d.name);
+        if let Ok(data) = client::call(&cfg, &Request::Dirs) {
+            for d in data.as_array().into_iter().flatten() {
+                println!("{}", d["name"]);
             }
         }
     }
     Ok(())
 }
 
-/// 输出全部标签名（每行一个，不带 @），供 shell 补全使用；未初始化时静默空输出
+/// 输出全部标签名（每行一个，不带 @），供补全脚本调用；服务不可用时静默空输出。
 fn cmd_tags_list() -> Result<()> {
     if let Ok(cfg) = Config::load() {
-        if let Ok(tags) = query::all_tags(&cfg.root) {
-            for t in tags {
+        if let Ok(data) = client::call(&cfg, &Request::Tags) {
+            for t in data.as_array().into_iter().flatten() {
                 println!("{t}");
             }
         }
@@ -298,7 +331,7 @@ _anm_complete() {
     case "${COMP_WORDS[1]}" in
         tag)
             if [[ ${COMP_CWORD} -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "sync add" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "move add" -- "${cur}") )
                 return
             fi
             ;;
@@ -336,7 +369,7 @@ _anm() {
     case "${words[2]}" in
         tag)
             if (( CURRENT == 3 )); then
-                _values 'tag command' sync add
+                _values 'tag command' move add
             else
                 _files
             fi
@@ -366,7 +399,7 @@ end
 
 complete -c anm -f -n '__fish_use_subcommand' -a 'init ls find search tags tag inbox open completion'
 complete -c anm -f -n '__fish_use_subcommand' -a '(__anm_dirs)'
-complete -c anm -f -n '__fish_seen_subcommand_from tag' -a 'sync add'
+complete -c anm -f -n '__fish_seen_subcommand_from tag' -a 'move add'
 complete -c anm -f -n '__fish_seen_subcommand_from find' -a '(__anm_tags)'
 complete -c anm -f -n 'not __fish_use_subcommand; and not __fish_seen_subcommand_from find tag' -a '(__fish_complete_path)'
 "###;

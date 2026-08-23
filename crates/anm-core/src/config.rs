@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 pub const CONFIG_DIR_NAME: &str = ".anm";
 /// 配置文件
 pub const CONFIG_FILE_NAME: &str = "config.toml";
-/// 索引文件
-pub const INDEX_FILE_NAME: &str = "index.jsonl";
 /// 默认编辑器
 pub const DEFAULT_EDITOR: &str = "vim";
 /// 默认 inbox 文件名
@@ -21,6 +19,10 @@ pub const DEFAULT_MCP_TRANSPORT: McpTransport = McpTransport::Http;
 pub const DEFAULT_MCP_HOST: &str = "127.0.0.1";
 /// 默认 MCP HTTP 端口
 pub const DEFAULT_MCP_PORT: u16 = 17371;
+/// 默认服务（IPC）绑定地址
+pub const DEFAULT_SERVER_HOST: &str = "127.0.0.1";
+/// 默认服务（IPC）端口
+pub const DEFAULT_SERVER_PORT: u16 = 17370;
 
 /// MCP 传输方式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -55,6 +57,32 @@ impl Default for McpConfig {
     }
 }
 
+/// 服务（IPC）配置段（`[server]`）：anm-core 服务面向三个应用
+/// （anm / anw / anm-win-tray）的查询 / 写入端点。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// IPC 绑定地址（默认仅回环；跨机器访问时设为 0.0.0.0）
+    pub host: String,
+    /// IPC 端口
+    pub port: u16,
+    /// 可选访问令牌：设置后所有 IPC 请求必须携带相同令牌，否则拒绝。
+    /// 仅内网/局域网使用的个人服务建议开启；若未来对公网开放，
+    /// 必须配合 VPN/SSH 隧道，不能只靠令牌。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: DEFAULT_SERVER_HOST.to_string(),
+            port: DEFAULT_SERVER_PORT,
+            token: None,
+        }
+    }
+}
+
 /// 落盘的配置文件内容
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -67,6 +95,8 @@ pub struct ConfigFile {
     pub skatch: Option<PathBuf>,
     /// MCP server 配置（默认本地 HTTP）
     pub mcp: McpConfig,
+    /// 服务（IPC）配置（默认本地 127.0.0.1:17370）
+    pub server: ServerConfig,
 }
 
 impl Default for ConfigFile {
@@ -76,6 +106,7 @@ impl Default for ConfigFile {
             editor: DEFAULT_EDITOR.to_string(),
             skatch: None,
             mcp: McpConfig::default(),
+            server: ServerConfig::default(),
         }
     }
 }
@@ -93,10 +124,10 @@ pub struct Config {
     pub editor: String,
     /// skatch.md 路径
     pub skatch: PathBuf,
-    /// 索引文件路径（`~/.anm/index.jsonl`）
-    pub index_path: PathBuf,
     /// MCP server 配置
     pub mcp: McpConfig,
+    /// 服务（IPC）配置
+    pub server: ServerConfig,
 }
 
 impl Config {
@@ -125,15 +156,14 @@ impl Config {
             return Err(anyhow!("配置中缺少 root，请重新运行 `anm init`"));
         }
         let skatch = file.skatch.unwrap_or_else(|| file.root.join(DEFAULT_SKATCH_NAME));
-        let index_path = home.join(INDEX_FILE_NAME);
         Ok(Self {
             home,
             config_path,
             root: file.root,
             editor: file.editor,
             skatch,
-            index_path,
             mcp: file.mcp,
+            server: file.server,
         })
     }
 
@@ -151,25 +181,25 @@ impl Config {
             editor: if editor.is_empty() { DEFAULT_EDITOR.to_string() } else { editor.to_string() },
             skatch: None,
             mcp: McpConfig::default(),
+            server: ServerConfig::default(),
         };
         let config_path = home.join(CONFIG_FILE_NAME);
         let raw = toml::to_string_pretty(&file)
             .with_context(|| "序列化配置失败")?;
         std::fs::write(&config_path, raw)
             .with_context(|| format!("写入配置失败: {}", config_path.display()))?;
-        let index_path = home.join(INDEX_FILE_NAME);
         Ok(Self {
             home,
             config_path,
             root,
             editor: file.editor,
             skatch: file.root.join(DEFAULT_SKATCH_NAME),
-            index_path,
             mcp: file.mcp,
+            server: file.server,
         })
     }
 
-    /// 保存当前配置（用于修改 root / editor / mcp 后落盘）
+    /// 保存当前配置（用于修改 root / editor / mcp / server 后落盘）
     pub fn save(&self) -> Result<()> {
         std::fs::create_dir_all(&self.home)
             .with_context(|| format!("创建配置目录失败: {}", self.home.display()))?;
@@ -178,6 +208,7 @@ impl Config {
             editor: self.editor.clone(),
             skatch: Some(self.skatch.clone()),
             mcp: self.mcp.clone(),
+            server: self.server.clone(),
         };
         let raw = toml::to_string_pretty(&file).with_context(|| "序列化配置失败")?;
         std::fs::write(&self.config_path, raw)
@@ -227,5 +258,37 @@ transport = "stdio"
         assert_eq!(file.mcp.host, "127.0.0.1");
         let out = toml::to_string(&file).unwrap();
         assert!(out.contains("transport = \"stdio\""));
+    }
+
+    #[test]
+    fn server_config_defaults_to_local_ipc() {
+        let server = ServerConfig::default();
+        assert_eq!(server.host, "127.0.0.1");
+        assert_eq!(server.port, 17370);
+    }
+
+    #[test]
+    fn old_config_without_server_section_falls_back_to_default() {
+        // 老配置文件没有 [server] 段：应回退到默认（本地 127.0.0.1:17370）
+        let raw = "root = \"/tmp/notes\"\neditor = \"vim\"\n";
+        let file: ConfigFile = toml::from_str(raw).unwrap();
+        assert_eq!(file.server, ServerConfig::default());
+    }
+
+    #[test]
+    fn server_section_round_trips() {
+        let raw = r#"
+root = "/tmp/notes"
+editor = "vim"
+
+[server]
+host = "0.0.0.0"
+port = 19000
+"#;
+        let file: ConfigFile = toml::from_str(raw).unwrap();
+        assert_eq!(file.server.host, "0.0.0.0");
+        assert_eq!(file.server.port, 19000);
+        let out = toml::to_string(&file).unwrap();
+        assert!(out.contains("port = 19000"));
     }
 }

@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use crate::tags;
 
 /// 一条笔记的元信息
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NoteInfo {
     /// 绝对路径
     pub path: PathBuf,
@@ -204,6 +204,65 @@ pub fn list_in_dir(root: &Path, rel_dir: &str) -> Result<Vec<NoteInfo>> {
     Ok(out)
 }
 
+/// 一级目录及其直接笔记、直接子目录的总览条目（readme §12 聚合原语：
+/// 只拼数据，不组织语言）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirOverview {
+    /// 目录名
+    pub name: String,
+    /// 目录绝对路径
+    pub path: PathBuf,
+    /// 目录下直接包含的笔记（非递归，按标题排序）
+    pub notes: Vec<NoteInfo>,
+    /// 直接子目录名（非递归、跳过隐藏；供托盘临时子卡片使用）
+    pub subdirs: Vec<String>,
+}
+
+/// 聚合查询：列出所有一级目录，并附带每个目录下直接包含的笔记与子目录。
+///
+/// 供需要"一次取全"的客户端使用（如 anm-tray-win 覆盖层的卡片总览）；
+/// 内部复用 `list_top_dirs` + `list_in_dir` 两个确定性原语。
+pub fn overview(root: &Path) -> Result<Vec<DirOverview>> {
+    let mut out = Vec::new();
+    for dir in crate::tree::list_top_dirs(root)? {
+        out.push(overview_of_dir(&dir.path, &dir.name, root, &dir.name)?);
+    }
+    Ok(out)
+}
+
+/// 查询任意（根目录内的）目录的总览：其直接笔记 + 直接子目录。
+///
+/// 供托盘"临时子卡片"使用：点击卡片中的子目录行时，拉取该子目录的内容。
+pub fn overview_dir(root: &Path, rel_dir: &str) -> Result<DirOverview> {
+    let dir = crate::path::resolve_dir_in_root(root, rel_dir)?;
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    overview_of_dir(&dir, &name, root, rel_dir)
+}
+
+/// 从已解析的目录路径构建总览条目（内部共用实现）。
+fn overview_of_dir(
+    dir: &Path,
+    name: &str,
+    root: &Path,
+    rel: &str,
+) -> Result<DirOverview> {
+    let notes = list_in_dir(root, rel)?;
+    let subdirs = crate::tree::list_top_dirs(dir)?
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    Ok(DirOverview {
+        name: name.to_string(),
+        path: dir.to_path_buf(),
+        notes,
+        subdirs,
+    })
+}
+
 /// 最近修改的笔记条目
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RecentNote {
@@ -320,6 +379,33 @@ mod tests {
         assert_eq!(notes.len(), 2);
         // 拒绝越界目录
         assert!(list_in_dir(&root, "../..").is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn overview_groups_dirs_with_their_notes() {
+        let root = make_root("overview"); // 夹具自带 ideas/（含 2 条笔记）与 .hidden/
+        std::fs::create_dir_all(root.join("ref")).unwrap();
+        std::fs::create_dir_all(root.join("ref/sub1")).unwrap();
+        std::fs::create_dir_all(root.join("ref/sub2")).unwrap();
+        std::fs::write(root.join("ref/linux.md"), "\n").unwrap();
+        std::fs::write(root.join("top.md"), "\n").unwrap(); // 根目录文件不属于任何一级目录卡片
+
+        let ov = overview(&root).unwrap();
+        assert_eq!(ov.len(), 2); // ideas + ref（.hidden 被跳过）
+        assert_eq!(ov[0].name, "ideas"); // 按名称排序在前
+        assert_eq!(ov[0].notes.len(), 2);
+        assert_eq!(ov[0].subdirs.len(), 0);
+        assert_eq!(ov[1].name, "ref");
+        assert_eq!(ov[1].notes.len(), 1);
+        assert_eq!(ov[1].notes[0].title, "linux");
+        assert_eq!(ov[1].subdirs, vec!["sub1", "sub2"]);
+
+        // 任意子目录的总览（临时子卡片数据源）
+        let sub = overview_dir(&root, "ref/sub1").unwrap();
+        assert_eq!(sub.name, "sub1");
+        assert!(sub.path.ends_with("ref/sub1"));
+        assert!(sub.notes.is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
