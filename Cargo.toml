@@ -5,6 +5,7 @@ members = [
     "crates/anm-cli",
     "crates/anm-tray-core",
     "crates/anm-tray-win",
+    "crates/anm-native-ext",
 ]
 
 [workspace.package]

@@ -1,0 +1,7 @@
+{
+  "name": "anm-tray",
+  "version": "3.0.0",
+  "description": "anm 托盘（Electron 版）",
+  "main": "main.js",
+  "private": true
+}
