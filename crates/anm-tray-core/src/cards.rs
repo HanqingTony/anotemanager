@@ -62,6 +62,8 @@ pub struct Card {
     pub subdirs: Vec<String>,
     /// 是否临时子卡片（点击子目录生成；不参与位置记忆，取消激活即清除）
     pub temp: bool,
+    /// 是否 skatch 卡片（inbox 段落卡片：暖色强调、宽度加宽、不参与目录位置记忆）
+    pub skatch: bool,
 }
 
 impl Card {
@@ -212,7 +214,53 @@ pub fn build_card(ov: &DirOverview, at: (i32, i32), params: &LayoutParams, temp:
         scroll: 0,
         max_visible: params.max_rows,
         temp,
+        skatch: false,
     }
+}
+
+/// 生成 skatch 卡片：显示 inbox 文件的段落列表（每段一行，取段落首行）。
+///
+/// - 宽度 = 普通卡片 + [`SKATCH_EXTRA_W`]，位置在屏幕左侧垂直居中；
+/// - 标题固定为 `"skatch"`；`dir_path` 为 skatch 文件路径（滚动记忆用）；
+/// - 段落行复用 `CardRow::File`（点击进内置编辑器，与笔记文件行为一致）。
+pub const SKATCH_EXTRA_W: i32 = 40;
+
+pub fn build_skatch_card(
+    skatch_path: &str,
+    segments: &[String],
+    screen_w: i32,
+    screen_h: i32,
+    params: &LayoutParams,
+) -> Card {
+    let mut rows = vec![CardRow::DirHeader];
+    for seg in segments {
+        // 段落可能多行：卡片行显示首行
+        let first = seg.lines().next().unwrap_or("").to_string();
+        rows.push(CardRow::File {
+            title: first,
+            path: skatch_path.to_string(),
+        });
+    }
+    let visible = rows.len().min(params.max_rows);
+    let card_h = params.padding * 2 + params.header_h + (visible as i32 - 1) * params.row_h;
+    let w = params.card_w + SKATCH_EXTRA_W;
+    let x = 16;
+    let y = ((screen_h - card_h) / 2).max(0);
+    let mut card = Card {
+        rect: Rect { x, y, w, h: card_h },
+        title: "skatch".to_string(),
+        dir_path: skatch_path.to_string(),
+        subdirs: Vec::new(),
+        rows,
+        row_rects: Vec::new(),
+        scroll: 0,
+        max_visible: params.max_rows,
+        temp: false,
+        skatch: true,
+    };
+    clamp_to_screen(&mut card, screen_w, screen_h);
+    recompute_row_rects(&mut card, params);
+    card
 }
 
 /// 生成临时子卡片（点击子目录行时调用）：位置为给定坐标（父卡片位置 + 偏移），
@@ -488,6 +536,28 @@ mod tests {
         assert!(scroll_card(card, 9999, &params));
         assert!(!scroll_card(card, 9999, &params));
         assert_eq!(card.scroll, card.max_scroll());
+    }
+
+    /// skatch 卡片：段落 → 每段一 File 行（首行）、宽度加宽、不夹出屏幕。
+    #[test]
+    fn skatch_card_built() {
+        let params = LayoutParams::default();
+        let segs = vec!["- 第一条".into(), "## 小节\n- 第二条内容\n- 续行".into()];
+        let card = build_skatch_card("C:/notes/skatch.md", &segs, 1920, 1080, &params);
+        assert!(card.skatch);
+        assert!(!card.temp);
+        assert_eq!(card.rect.w, params.card_w + SKATCH_EXTRA_W);
+        assert_eq!(card.rows.len(), 3); // 头 + 2 段
+        assert_eq!(card.title, "skatch");
+        match &card.rows[2] {
+            CardRow::File { title, path } => {
+                assert_eq!(title, "## 小节");
+                assert_eq!(path, "C:/notes/skatch.md");
+            }
+            _ => panic!("段落应为 File 行"),
+        }
+        assert_eq!(card.row_rects.len(), 3);
+        assert!(card.rect.x >= 0 && card.rect.y >= 0);
     }
 
     /// 临时子卡片：build_temp_card 标记 temp、夹紧屏幕、可拖动。

@@ -138,20 +138,24 @@ fn exec(cfg: &Config, req: Request) -> anyhow::Result<serde_json::Value> {
             let content = std::fs::read_to_string(&resolved)?;
             Ok(serde_json::json!({
                 "path": resolved,
+                "root": cfg.root,
                 "content": content,
                 "chars": content.chars().count(),
             }))
         }
         Request::WriteNote { path, content } => {
             let resolved = resolve_note_arg(cfg, &path)?;
+            // 统一 POSIX 换行：RichEdit 读取的文本是 CRLF，写回前规范化，
+            // 避免笔记文件被编辑器保存后混入 \r\n（破坏空行分段）
+            let content = content.replace("\r\n", "\n").replace('\r', "\n");
             std::fs::write(&resolved, content)?;
-            Ok(serde_json::json!({ "path": resolved, "written": true }))
+            Ok(serde_json::json!({ "path": resolved, "root": cfg.root, "written": true }))
         }
         Request::CreateNote { dir, title } => {
             // 标题允许带 .md/.markdown/.txt 后缀，剥离后再交给 create_note（内部补 .md）
             let stem = strip_note_ext(&title);
             let created = notes::create_note(&cfg.root, &dir, &stem, "")?;
-            Ok(serde_json::json!({ "path": created, "created": true }))
+            Ok(serde_json::json!({ "path": created, "root": cfg.root, "created": true }))
         }
         Request::RenameNote { from, to } => {
             let from_r = resolve_note_arg(cfg, &from)?;
@@ -176,7 +180,77 @@ fn exec(cfg: &Config, req: Request) -> anyhow::Result<serde_json::Value> {
                 bail!("目标已存在，不覆盖: {}", to_r.display());
             }
             std::fs::rename(&from_r, &to_r)?;
-            Ok(serde_json::json!({ "from": from_r, "to": to_r, "renamed": true }))
+            Ok(serde_json::json!({ "from": from_r, "to": to_r, "root": cfg.root, "renamed": true }))
+        }
+        Request::Skatch => {
+            let segments = query::skatch_segments(&cfg.skatch)?;
+            Ok(serde_json::json!({
+                "path": cfg.skatch,
+                "root": cfg.root,
+                "segments": segments,
+            }))
+        }
+        Request::SkatchExtract { dir, index } => {
+            let segments = query::skatch_segments(&cfg.skatch)?;
+            let segment = segments
+                .get(index)
+                .ok_or_else(|| anyhow::anyhow!("段落下标越界（共 {} 段）: {index}", segments.len()))?
+                .clone();
+            // 从 skatch 中移除该段（其余段落按空行重新拼接写回）
+            let rest = segments
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != index)
+                .map(|(_, s)| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            std::fs::write(&cfg.skatch, if rest.is_empty() { String::new() } else { rest + "\n" })?;
+            // 段落首行作为新笔记标题
+            let title = segment.lines().next().unwrap_or("新笔记").to_string();
+            let created = notes::create_note(&cfg.root, &dir, &title, &segment)?;
+            Ok(serde_json::json!({ "path": created, "root": cfg.root, "extracted": true }))
+        }
+        Request::SkatchInsert { from } => {
+            let from_r = resolve_note_arg(cfg, &from)?;
+            if from_r == cfg.skatch {
+                bail!("不能把 skatch 并入自身");
+            }
+            let content = std::fs::read_to_string(&from_r)?;
+            let mut skatch_text = std::fs::read_to_string(&cfg.skatch).unwrap_or_default();
+            if !skatch_text.trim_end().is_empty() {
+                skatch_text.push_str("\n\n");
+            }
+            skatch_text.push_str(&content);
+            if !skatch_text.ends_with('\n') {
+                skatch_text.push('\n');
+            }
+            std::fs::write(&cfg.skatch, skatch_text)?;
+            std::fs::remove_file(&from_r)?;
+            Ok(serde_json::json!({
+                "skatch": cfg.skatch,
+                "root": cfg.root,
+                "removed": from_r,
+                "inserted": true,
+            }))
+        }
+        Request::MoveNote { from, to_dir } => {
+            let from_r = resolve_note_arg(cfg, &from)?;
+            let to_dir_r = path::resolve_dir_in_root(&cfg.root, &to_dir)?;
+            if from_r.parent() == Some(to_dir_r.as_path()) {
+                bail!("文件已在目标目录中: {from}");
+            }
+            if to_dir_r == cfg.skatch.parent().map(|p| p.to_path_buf()).unwrap_or_default() {
+                // skatch.md 所在目录可作目标（无特殊限制），此处仅防移动到自身
+            }
+            let name = from_r
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("源文件无文件名: {from}"))?;
+            let to_r = to_dir_r.join(name);
+            if to_r.exists() {
+                bail!("目标已存在，不覆盖: {}", to_r.display());
+            }
+            std::fs::rename(&from_r, &to_r)?;
+            Ok(serde_json::json!({ "from": from_r, "to": to_r, "root": cfg.root, "moved": true }))
         }
     }
 }
@@ -376,6 +450,109 @@ mod tests {
             from: "idea/b.md".into(),
             to: "idea/c.md".into(),
         });
+        assert!(!resp.ok);
+        std::fs::remove_dir_all(&cfg.home.parent().unwrap()).unwrap();
+    }
+
+    /// skatch 总览：空行分隔段落，返回首行与全文段；root 字段随附。
+    #[test]
+    fn dispatch_skatch() {
+        let cfg = test_config("skatch");
+        std::fs::create_dir_all(cfg.root.join("idea")).unwrap();
+        std::fs::write(&cfg.skatch, "- 第一条\n\n## 小节\n- 第二条内容\n- 续行\n\n").unwrap();
+
+        let resp = dispatch(&cfg, Request::Skatch);
+        assert!(resp.ok, "{}", resp.error.unwrap_or_default());
+        let d = resp.data.unwrap();
+        // 按行分段：空行丢弃，其余每行一段
+        assert_eq!(d["segments"].as_array().unwrap().len(), 4);
+        assert_eq!(d["segments"][0], "- 第一条");
+        assert_eq!(d["segments"][1], "## 小节");
+        assert_eq!(d["segments"][2], "- 第二条内容");
+        assert_eq!(d["segments"][3], "- 续行");
+        assert!(d["root"].is_string());
+
+        // root 字段随 ReadNote 响应
+        std::fs::write(cfg.root.join("idea/a.md"), "# A\n").unwrap();
+        let resp = dispatch(&cfg, Request::ReadNote { path: "idea/a.md".into() });
+        assert_eq!(resp.data.unwrap()["root"], cfg.root.to_str().unwrap());
+        std::fs::remove_dir_all(&cfg.home.parent().unwrap()).unwrap();
+    }
+
+    /// 跨目录移动：源必须存在、目标目录白名单、重名拒绝、成功后原路径消失。
+    #[test]
+    fn dispatch_move_note() {
+        let cfg = test_config("move");
+        std::fs::create_dir_all(cfg.root.join("idea")).unwrap();
+        std::fs::create_dir_all(cfg.root.join("ref")).unwrap();
+        std::fs::write(cfg.root.join("idea/a.md"), "# A\n").unwrap();
+
+        // 跨目录移动成功
+        let resp = dispatch(&cfg, Request::MoveNote {
+            from: "idea/a.md".into(),
+            to_dir: "ref".into(),
+        });
+        assert!(resp.ok, "{}", resp.error.unwrap_or_default());
+        assert!(cfg.root.join("ref/a.md").exists());
+        assert!(!cfg.root.join("idea/a.md").exists());
+        assert_eq!(resp.data.unwrap()["root"], cfg.root.to_str().unwrap());
+
+        // 已存在 → 拒绝
+        std::fs::write(cfg.root.join("idea/b.md"), "# B\n").unwrap();
+        std::fs::write(cfg.root.join("ref/b.md"), "# B2\n").unwrap();
+        let resp = dispatch(&cfg, Request::MoveNote {
+            from: "idea/b.md".into(),
+            to_dir: "ref".into(),
+        });
+        assert!(!resp.ok);
+        assert!(resp.error.unwrap().contains("已存在"));
+
+        // 同目录 → 拒绝
+        let resp = dispatch(&cfg, Request::MoveNote {
+            from: "idea/b.md".into(),
+            to_dir: "idea".into(),
+        });
+        assert!(!resp.ok);
+        std::fs::remove_dir_all(&cfg.home.parent().unwrap()).unwrap();
+    }
+
+    /// skatch 抽取/并入：段落出文件、文件入 skatch，双向对称。
+    #[test]
+    fn dispatch_skatch_extract_insert() {
+        let cfg = test_config("skx");
+        std::fs::create_dir_all(cfg.root.join("idea")).unwrap();
+        std::fs::write(&cfg.skatch, "- 第一条\n\n## 小节\n- 内容\n").unwrap();
+
+        // 抽取下标 1 的段落 → idea 下新文件，skatch 剩第一条
+        let resp = dispatch(&cfg, Request::SkatchExtract {
+            dir: "idea".into(),
+            index: 1,
+        });
+        assert!(resp.ok, "{}", resp.error.unwrap_or_default());
+        let p = resp.data.unwrap()["path"].as_str().unwrap().to_string();
+        assert!(p.ends_with("小节.md"), "{p}");
+        assert!(std::fs::read_to_string(&p).unwrap().contains("## 小节"));
+        let remain = std::fs::read_to_string(&cfg.skatch).unwrap();
+        assert!(remain.contains("- 第一条"));
+        assert!(!remain.contains("## 小节"));
+
+        // 下标越界 → 拒绝
+        let resp = dispatch(&cfg, Request::SkatchExtract { dir: "idea".into(), index: 99 });
+        assert!(!resp.ok);
+
+        // 并入：抽取出的文件 → skatch 末尾，原文件删除
+        let fname = std::path::Path::new(&p).file_name().unwrap().to_string_lossy().to_string();
+        let resp = dispatch(&cfg, Request::SkatchInsert {
+            from: format!("idea/{fname}"),
+        });
+        assert!(resp.ok, "{}", resp.error.unwrap_or_default());
+        let sk = std::fs::read_to_string(&cfg.skatch).unwrap();
+        assert!(sk.contains("## 小节"));
+        assert!(sk.starts_with("- 第一条"));
+        assert!(!cfg.root.join("idea").join(fname).exists());
+
+        // skatch 自身并入 → 拒绝
+        let resp = dispatch(&cfg, Request::SkatchInsert { from: "skatch.md".into() });
         assert!(!resp.ok);
         std::fs::remove_dir_all(&cfg.home.parent().unwrap()).unwrap();
     }

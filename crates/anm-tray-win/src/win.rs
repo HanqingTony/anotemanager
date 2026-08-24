@@ -34,9 +34,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     DT_SINGLELINE, DT_TOP, DT_VCENTER, DT_WORDBREAK, FF_DONTCARE, HBRUSH, HDC, HFONT, HGDIOBJ,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows_sys::Win32::System::Threading::CreateMutexW;
-use windows_sys::Win32::UI::Controls::{EM_SETSEL, WM_MOUSELEAVE};
+use windows_sys::Win32::UI::Controls::{EM_SETSEL, WM_CTLCOLOR, WM_MOUSELEAVE};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent,
     UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, TME_LEAVE, TRACKMOUSEEVENT,
@@ -78,8 +78,16 @@ const TRAY_MSG: u32 = WM_APP + 1;
 /// 异步拉取总览完成的消息（后台线程 PostMessage 到主窗口）。
 const MSG_OVERVIEW_DONE: u32 = WM_APP + 2;
 
+/// 后台拉取的主界面数据：目录总览 + skatch 卡片数据（路径 / 根目录 / 段落）。
+struct HomeData {
+    /// 一级目录总览
+    dirs: Vec<DirOverview>,
+    /// skatch 信息（path, root, segments）；拉取失败为 None（不阻塞主界面）
+    skatch: Option<(String, String, Vec<String>)>,
+}
+
 /// 后台拉取总览的共享结果槽（一次一个；主线程消费后清空）。
-static OVERVIEW_RESULT: Mutex<Option<Result<Vec<DirOverview>, String>>> = Mutex::new(None);
+static HOME_RESULT: Mutex<Option<Result<HomeData, String>>> = Mutex::new(None);
 /// 是否已有一次拉取在进行（防重复）。
 static OVERVIEW_FETCHING: AtomicBool = AtomicBool::new(false);
 /// 全局快捷键注册 id。
@@ -122,9 +130,8 @@ const EDITOR_W: i32 = 760;
 const EDITOR_H: i32 = 440;
 /// 编辑器头部信息栏高度（文件名 + 路径）
 const EDITOR_HEADER_H: i32 = 42;
-/// 自绘按钮高度 / 间距
+/// 自绘按钮高度
 const EDITOR_BTN_H: i32 = 26;
-const EDITOR_BTN_GAP: i32 = 8;
 /// 自绘按钮标识（命中测试用）
 const BTN_LOCATION: u8 = 1;
 const BTN_SAVE: u8 = 2;
@@ -142,6 +149,27 @@ const TOAST_W: i32 = 420;
 const TOAST_H: i32 = 56;
 const TOAST_TIMER: usize = 1;
 const TOAST_MS: usize = 3200;
+/// 单击时间阈值（毫秒）：按住文件行超过该时长后松开 = 预览结束（关闭编辑器）；
+/// 未超过 = 正常单击（编辑器保持打开）。
+const CLICK_MS: u128 = 300;
+/// EM_SCROLLCARET（滚动到光标处；windows-sys 未导出，按文档值使用）
+const EM_SCROLLCARET: u32 = 0x00B7;
+/// EM_CHARFROMPOS（客户区坐标 → 字符下标；EDIT/RichEdit 均支持）
+const EM_CHARFROMPOS: u32 = 0x00D7;
+/// RichEdit 段落格式（EM_SETPARAFORMAT 0x0445；PARAFORMAT2 需手动定义）
+const EM_SETPARAFORMAT: u32 = 0x0445;
+/// RichEdit 背景色（EM_SETBKGNDCOLOR 0x0443；wParam=0 使用 lParam 颜色）
+const EM_SETBKGNDCOLOR: u32 = 0x0443;
+/// RichEdit 字符格式（EM_SETCHARFORMAT 0x0444；SCF_ALL=4 应用于全文）
+const EM_SETCHARFORMAT: u32 = 0x0444;
+const SCF_ALL: usize = 0x0004;
+const CFM_COLOR: u32 = 0x4000_0000;
+/// CHARFORMAT2W 字体名数组长度（LF_FACESIZE）
+const LF_FACESIZE: usize = 32;
+const PFM_SPACEBEFORE: u32 = 0x0000_0040;
+const PFM_SPACEAFTER: u32 = 0x0000_0080;
+/// RichEdit 2.0 控件类（msftedit.dll）
+const RICHEDIT_CLASS: &str = "RICHEDIT50W";
 /// 设置对话框按钮标识。
 const BTN_SETTINGS_OK: u8 = 1;
 const BTN_SETTINGS_CANCEL: u8 = 2;
@@ -150,6 +178,103 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "md", "markdown", "txt", "text", "log", "json", "toml", "yaml", "yml", "csv", "ini", "conf",
     "cfg", "py", "rs", "sh", "ts", "js", "html", "css",
 ];
+
+/// 内容行（文件/子目录）按下状态：编辑器预览与拖动移动共用。
+struct RowPress {
+    /// 所在卡片下标
+    card: usize,
+    /// 可见行下标
+    row: usize,
+    /// 按下位置（判定拖动阈值）
+    start_x: i32,
+    /// 按下位置
+    start_y: i32,
+    /// 已移动超过阈值（进入拖动）
+    moved: bool,
+    /// 按下时刻（区分单击与长按预览）
+    press_at: std::time::Instant,
+    /// 源文件 core 路径（`File` 行才有；子目录行为 None）
+    path: Option<String>,
+    /// 源行是否为 skatch 段落（段落下标 = 真实行 - 1；拖到目录卡 = 抽取成文件）
+    skatch_index: Option<usize>,
+    /// 按下时编辑器是否已打开同一文件（松开快速单击时 toggle 关闭用）
+    was_open: bool,
+    /// 按下时预览打开/关闭的子卡片目录（子目录行按下即显示子卡预览）
+    subcard_dir: Option<String>,
+    /// 按下时是否打开了子卡预览（长按/拖动松开时关闭预览）
+    subcard_opened: bool,
+}
+
+/// RichEdit 字符格式结构（CHARFORMAT2W，仅用到颜色字段）。
+#[repr(C)]
+struct Charfmt2 {
+    cb_size: u32,
+    dw_mask: u32,
+    dw_effects: u32,
+    y_height: i32,
+    y_offset: i32,
+    cr_text_color: u32,
+    b_charset: u8,
+    b_pitch_and_family: u8,
+    sz_face_name: [u16; LF_FACESIZE],
+    w_weight: u16,
+    s_spacing: i16,
+    cr_back_color: u32,
+    lcid: u32,
+    dw_reserved: u32,
+    s_style: i16,
+    w_kerning: u16,
+    b_underline_type: u8,
+    b_animation: u8,
+    b_rev_author: u8,
+    b_underline_color: u8,
+}
+
+/// RichEdit 全文文字设为白色（EM_SETCHARFORMAT SCF_ALL；须在内容加载后调用）。
+fn set_rich_text_white(edit: HWND) {
+    unsafe {
+        let mut cf: Charfmt2 = std::mem::zeroed();
+        cf.cb_size = size_of::<Charfmt2>() as u32;
+        cf.dw_mask = CFM_COLOR;
+        cf.dw_effects = 0; // 不用自动色，强制指定
+        cf.cr_text_color = rgb(235, 238, 245);
+        SendMessageW(
+            edit,
+            EM_SETCHARFORMAT,
+            SCF_ALL as usize,
+            &cf as *const Charfmt2 as isize,
+        );
+    }
+}
+
+/// RichEdit 段落格式结构（PARAFORMAT2，仅用到间距字段）。
+#[repr(C)]
+struct Parafmt2 {
+    cb_size: u32,
+    dw_mask: u32,
+    w_numbering: u16,
+    w_reserved: u16,
+    dx_start_indent: i32,
+    dx_right_indent: i32,
+    dx_offset: i32,
+    w_alignment: u16,
+    c_tab_count: i16,
+    rgx_tabs: [i32; 32],
+    dy_space_before: i32,
+    dy_space_after: i32,
+    dy_line_spacing: i32,
+    s_style: i16,
+    b_line_spacing_rule: u8,
+    b_outline_level: u8,
+    w_shading_weight: u16,
+    w_shading_style: u16,
+    w_numbering_start: u16,
+    w_numbering_style: u16,
+    w_numbering_tab: u16,
+    w_border_space: u16,
+    w_border_width: u16,
+    w_border_styles: u16,
+}
 
 /// 外壳状态：窗口句柄 + 共享核心状态。
 struct ShellState {
@@ -204,6 +329,10 @@ struct ShellState {
     overlay_visible: bool,
     /// 新建笔记模式：Some(目录) = 输入框处于"输入文件名回车创建"状态
     pending_new_note: Option<String>,
+    /// 内容行按下状态（文件行：编辑器预览/拖动移动；子目录行：仅点击）
+    row_press: Option<RowPress>,
+    /// skatch 导航条 hover 段落下标（联动覆盖层 skatch 卡片指示条）
+    nav_hover: Option<usize>,
 }
 
 thread_local! {
@@ -346,11 +475,14 @@ pub fn run() -> ! {
             sh.old_edit_proc = Some(std::mem::transmute::<isize, _>(old));
             sh.edit = edit;
 
-            // 编辑器多行 EDIT：创建时带 ES_MULTILINE 才真正启用自动换行
-            //（运行时 SetWindowLongPtrW 切换样式不改变换行行为，故用独立控件）
+            // 编辑器多行编辑控件：RichEdit（msftedit.dll 的 RICHEDIT50W）——
+            // 支持段落间距（skatch 段落分隔）与 EM_CHARFROMPOS（hover 文段联动）
+            let rich_edit_lib = to_wide("msftedit.dll");
+            LoadLibraryW(rich_edit_lib.as_ptr());
+            let rich_class = to_wide(RICHEDIT_CLASS);
             let edit_editor = CreateWindowExW(
                 0,
-                w!("EDIT"),
+                rich_class.as_ptr(),
                 w!(""),
                 WS_CHILD | ES_MULTILINE as u32
                     | ES_AUTOVSCROLL as u32
@@ -403,6 +535,9 @@ pub fn run() -> ! {
         });
         SendMessageW(edit, WM_SETFONT, input_font as WPARAM, 1);
         let edit_editor = SHELL.with(|s| s.borrow().edit_editor);
+        // RichEdit 背景直接设置（深色主题；不依赖父窗口 WM_CTLCOLOR）
+        // 铁律：SendMessageW 必须在 SHELL 借用之外
+        SendMessageW(edit_editor, EM_SETBKGNDCOLOR, 0, rgb(40, 43, 50) as isize);
         SendMessageW(edit_editor, WM_SETFONT, input_font as WPARAM, 1);
         let rename_edit = SHELL.with(|s| s.borrow().rename_edit);
         SendMessageW(rename_edit, WM_SETFONT, input_font as WPARAM, 1);
@@ -764,16 +899,49 @@ fn fetch_overview_async() {
     if OVERVIEW_FETCHING.swap(true, Ordering::SeqCst) {
         return;
     }
+    // 刷新前先保存当前卡片滚动位置（否则重建后滚动条归零）
+    let scrolls_now: Vec<(String, usize)> = SHELL.with(|s| {
+        s.borrow()
+            .core
+            .cards
+            .iter()
+            .filter(|c| !c.temp && c.scroll > 0)
+            .map(|c| (c.dir_path.clone(), c.scroll))
+            .collect()
+    });
+    if !scrolls_now.is_empty() {
+        SHELL.with(|s| {
+            let mut sh = s.borrow_mut();
+            for (dir, sc) in scrolls_now {
+                sh.core.scrolls.insert(dir, sc);
+            }
+        });
+    }
     // HWND 非 Send：转 usize 进线程，用回再转
     let tray = SHELL.with(|s| s.borrow().tray_hwnd as usize);
     std::thread::spawn(move || {
-        let result = ipc::call(&Request::Overview)
-            .and_then(|data| {
-                serde_json::from_value::<Vec<DirOverview>>(data)
-                    .map_err(|e| anyhow::anyhow!("总览数据解析失败: {e}"))
-            })
-            .map_err(|e| format!("{e:#}"));
-        *OVERVIEW_RESULT.lock().unwrap() = Some(result);
+        // 总览与 skatch 各一次 IPC（skatch 失败不阻塞主界面）
+        let dirs = ipc::call(&Request::Overview).and_then(|data| {
+            serde_json::from_value::<Vec<DirOverview>>(data)
+                .map_err(|e| anyhow::anyhow!("总览数据解析失败: {e}"))
+        });
+        let skatch = ipc::call(&Request::Skatch).ok().and_then(|data| {
+            let v = data.as_object()?;
+            let path = v.get("path")?.as_str()?.to_string();
+            let root = v.get("root").and_then(|r| r.as_str()).unwrap_or("").to_string();
+            let segments = v
+                .get("segments")?
+                .as_array()?
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect::<Vec<_>>();
+            Some((path, root, segments))
+        });
+        let result = match dirs {
+            Ok(dirs) => Ok(HomeData { dirs, skatch }),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        *HOME_RESULT.lock().unwrap() = Some(result);
         unsafe {
             PostMessageW(tray as HWND, MSG_OVERVIEW_DONE, 0, 0);
         }
@@ -784,12 +952,12 @@ fn fetch_overview_async() {
 /// 已取消激活则丢弃（下次激活会重新拉取）。
 fn apply_overview_result() {
     OVERVIEW_FETCHING.store(false, Ordering::SeqCst);
-    let result = OVERVIEW_RESULT.lock().unwrap().take();
+    let result = HOME_RESULT.lock().unwrap().take();
     let Some(result) = result else {
         return;
     };
     match result {
-        Ok(dirs) => {
+        Ok(home) => {
             let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
             let hwnd = SHELL.with(|s| {
                 let mut st = s.borrow_mut();
@@ -797,7 +965,13 @@ fn apply_overview_result() {
                     return None;
                 }
                 let params = st.params.clone();
-                let (input_rect, cards) = cards::layout(sw, sh, &dirs, &params);
+                let (input_rect, mut cards) = cards::layout(sw, sh, &home.dirs, &params);
+                // skatch 卡片追加在末尾（最上层；暖色强调、宽度加宽，见渲染）
+                if let Some((path, _root, segments)) = &home.skatch {
+                    if !segments.is_empty() {
+                        cards.push(cards::build_skatch_card(path, segments, sw, sh, &params));
+                    }
+                }
                 st.core.cards = cards;
                 st.core.input_rect = input_rect;
                 st.core.result.clear();
@@ -842,8 +1016,11 @@ fn deactivate_overlay() {
             sh.core.result = editor_msg;
         }
         sh.core.clear_transient();
+        sh.core.subcard_top = None;
         sh.overlay_visible = false;
         sh.pending_new_note = None;
+        sh.row_press = None;
+        sh.nav_hover = None;
     });
     unsafe {
         ShowWindow(hwnd, SW_HIDE);
@@ -923,9 +1100,79 @@ fn execute_action(action: Action) {
                 ));
             }
         }
-        Action::EnterEditor(core_path) => enter_editor_mode(&core_path),
+        Action::EnterEditor(core_path) => {
+            // 再次点击正在编辑的文件名 = 关闭编辑器（与 ✕ 一致）
+            let same = SHELL.with(|s| {
+                s.borrow()
+                    .core
+                    .editor
+                    .as_ref()
+                    .map_or(false, |e| e.path == core_path)
+            });
+            if same {
+                exit_editor_mode();
+            } else {
+                enter_editor_mode(&core_path, None);
+            }
+        }
         Action::OpenTempCard { dir_path, at } => open_temp_card(&dir_path, at),
         Action::NewNote(dir) => start_new_note(&dir),
+        Action::MoveNote { from, to_dir } => {
+            match ipc::call(&Request::MoveNote {
+                from: from.clone(),
+                to_dir: to_dir.clone(),
+            }) {
+                Ok(_) => {
+                    SHELL.with(|s| {
+                        let mut sh = s.borrow_mut();
+                        sh.core.result = format!("已移动 → {to_dir}");
+                        sh.core.error.clear();
+                    });
+                    let hwnd = SHELL.with(|s| s.borrow().hwnd);
+                    render_overlay(hwnd);
+                    fetch_overview_async();
+                }
+                Err(e) => set_error(format!("{e:#}")),
+            }
+        }
+        Action::SkatchExtract { dir, index } => {
+            match ipc::call(&Request::SkatchExtract {
+                dir: dir.clone(),
+                index,
+            }) {
+                Ok(data) => {
+                    let p = data
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&dir)
+                        .to_string();
+                    SHELL.with(|s| {
+                        let mut sh = s.borrow_mut();
+                        sh.core.result = format!("已抽取为文件 {p}");
+                        sh.core.error.clear();
+                    });
+                    let hwnd = SHELL.with(|s| s.borrow().hwnd);
+                    render_overlay(hwnd);
+                    fetch_overview_async();
+                }
+                Err(e) => set_error(format!("{e:#}")),
+            }
+        }
+        Action::SkatchInsert { from } => {
+            match ipc::call(&Request::SkatchInsert { from: from.clone() }) {
+                Ok(_) => {
+                    SHELL.with(|s| {
+                        let mut sh = s.borrow_mut();
+                        sh.core.result = format!("已并入 skatch ← {from}");
+                        sh.core.error.clear();
+                    });
+                    let hwnd = SHELL.with(|s| s.borrow().hwnd);
+                    render_overlay(hwnd);
+                    fetch_overview_async();
+                }
+                Err(e) => set_error(format!("{e:#}")),
+            }
+        }
         Action::SavePositions => save_positions(),
     }
 }
@@ -1010,8 +1257,30 @@ fn cancel_new_note() {
     render_overlay(hwnd);
 }
 
-/// 打开临时子卡片：IPC 拉取子目录总览 → 构建临时卡片 → 加入状态 → 渲染。
+/// 打开临时子卡片：同一目录已存在临时卡 → **关闭**（与内置编辑器一致）；
+/// 否则 IPC 拉取子目录总览 → 构建临时卡片 → 加入状态 → 渲染。
 fn open_temp_card(dir_path: &str, at: (i32, i32)) {
+    // 先查是否已有同目录临时卡（不拉数据）：有 → 关闭（并清除其置顶）
+    let exists = SHELL.with(|s| {
+        s.borrow()
+            .core
+            .cards
+            .iter()
+            .any(|c| c.temp && c.dir_path == dir_path)
+    });
+    if exists {
+        let hwnd = SHELL.with(|s| {
+            let mut sh = s.borrow_mut();
+            sh.core.cards.retain(|c| !(c.temp && c.dir_path == dir_path));
+            if sh.core.subcard_top.as_deref() == Some(dir_path) {
+                sh.core.subcard_top = None;
+            }
+            sh.hwnd
+        });
+        render_overlay(hwnd);
+        return;
+    }
+    // 没有 → 拉数据开新卡
     let result = ipc::call(&Request::OverviewDir {
         dir: dir_path.to_string(),
     });
@@ -1023,10 +1292,9 @@ fn open_temp_card(dir_path: &str, at: (i32, i32)) {
                 };
                 let hwnd = SHELL.with(|s| {
                     let mut sh = s.borrow_mut();
-                    // 开关语义：同一目录已存在临时卡片 → 先移除旧卡再开新的
-                    let target = ov.path.to_string_lossy().to_string();
-                    sh.core.cards.retain(|c| !(c.temp && c.dir_path == target));
                     let card = cards::build_temp_card(&ov, at, sw, screen_h, &sh.params);
+                    // 子卡打开即置顶（保持到父/子卡都不再 hover）
+                    sh.core.subcard_top = Some(card.dir_path.clone());
                     sh.core.cards.push(card);
                     sh.hwnd
                 });
@@ -1053,10 +1321,14 @@ fn set_error(msg: String) {
 // ---------------------------------------------------------------------------
 
 /// 进入编辑器模式：核心经 IPC 读取笔记内容 → 输入框窗口放大为多行编辑框，
-/// 显示「打开所在位置」「✕」按钮。内容读取/保存全部走 core（跨机器可编辑）。
-fn enter_editor_mode(core_path: &str) {
+/// 显示导航条（skatch 模式）/按钮。内容读取/保存全部走 core（跨机器可编辑）。
+///
+/// `skatch_index`：skatch 段落点开时传入段落下标（定位到该段并滚动导航条）。
+fn enter_editor_mode(core_path: &str, skatch_index: Option<usize>) {
     // 核心经 IPC 读取（失败 → 错误提示，不进入编辑模式）
-    let read_ok = SHELL.with(|s| model::enter_editor(&mut s.borrow_mut().core, core_path));
+    let read_ok = SHELL.with(|s| {
+        model::enter_editor(&mut s.borrow_mut().core, core_path, skatch_index)
+    });
     if let Err(e) = read_ok {
         set_error(e);
         return;
@@ -1103,13 +1375,13 @@ fn enter_editor_mode(core_path: &str) {
             edit_rect.h,
             0,
         );
-        // 头部第一行：文件名输入框（可改名），顶到分隔线
+        // 头部第一行：文件名输入框（可改名），右端让出保存/✕
         SetWindowPos(
             rename_edit,
             null_mut(),
             14,
             8,
-            EDITOR_W - 28,
+            EDITOR_W - 148,
             26,
             SWP_SHOWWINDOW,
         );
@@ -1117,11 +1389,55 @@ fn enter_editor_mode(core_path: &str) {
         SetWindowTextW(rename_edit, name_wide.as_ptr());
         let wide = to_wide(&content);
         SetWindowTextW(edit_editor, wide.as_ptr());
+        // 内容加载后再应用白色文字（SCF_ALL 对空文本无效——须在 WM_SETTEXT 之后）
+        set_rich_text_white(edit_editor);
         ShowWindow(edit, SW_HIDE);
         ShowWindow(rename_edit, SW_SHOW);
         ShowWindow(edit_editor, SW_SHOW);
         SHELL.with(|s| s.borrow_mut().btn_hover = 0);
         SetFocus(edit_editor);
+    }
+    // skatch 段落分隔 + 定位（借用外）：先逐段设置段后间距并清除选择，
+    // 再滚动定位到所选段落（顺序不可反——间距设置会移动光标）
+    if let Some(idx) = skatch_index {
+        let content = SHELL.with(|s| {
+            s.borrow()
+                .core
+                .editor
+                .as_ref()
+                .map(|ed| ed.content.clone())
+                .unwrap_or_default()
+        });
+        unsafe {
+            // RichEdit 内部为 CRLF：先把内容转成显示文本（\n → \r\n），
+            // 后续所有偏移（EM_SETSEL / EM_CHARFROMPOS）都基于它——
+            // 这是 Windows 平台层的换算，共享层保持 LF 语义（wayland 版不需要）。
+            let display = content.replace('\n', "\r\n");
+            // 1) 段落分隔：按行分段，逐行把**光标**放到行首（不产生选择、
+            //    不滚动视图），EM_SETPARAFORMAT wParam=0 应用于光标所在行。
+            let mut off16 = 0usize;
+            for line in display.split('\n') {
+                let len16 = line.encode_utf16().count();
+                SendMessageW(edit_editor, EM_SETSEL, off16 as usize, off16 as isize);
+                let mut pf: Parafmt2 = std::mem::zeroed();
+                pf.cb_size = size_of::<Parafmt2>() as u32;
+                pf.dw_mask = PFM_SPACEBEFORE | PFM_SPACEAFTER;
+                pf.dy_space_before = 40;
+                pf.dy_space_after = 120; // twips：行后约 6pt，形成明显行间分隔
+                SendMessageW(
+                    edit_editor,
+                    EM_SETPARAFORMAT,
+                    0, // 应用于光标所在段落
+                    &pf as *const Parafmt2 as isize,
+                );
+                off16 += len16 + 1; // 行(含行尾 \r) + \n
+            }
+            // 2) 定位到所选行（光标置于行首，滚动到可见；偏移同为 UTF-16）
+            if let Some(off) = model::skatch_segment_offset(&display, idx) {
+                SendMessageW(edit_editor, EM_SETSEL, off as usize, off as isize);
+                SendMessageW(edit_editor, EM_SCROLLCARET, 0, 0);
+            }
+        }
     }
     raise_input_window();
     render_overlay(hwnd);
@@ -1169,10 +1485,10 @@ fn exit_editor_mode() {
     }
     if !msg.is_empty() {
         SHELL.with(|s| s.borrow_mut().core.result = msg);
+        // 有保存/改名才刷新总览（无改动的预览关闭不刷新，避免卡片重建）
+        fetch_overview_async();
     }
     render_overlay(hwnd);
-    // 退出编辑器后卡片行（文件名）可能已改名 → 后台刷新总览
-    fetch_overview_async();
 }
 
 /// 保存编辑器改动（Ctrl+S；含文件名改动）。
@@ -1308,42 +1624,229 @@ unsafe extern "system" fn overlay_wndproc(
     }
 }
 
-/// 鼠标按下：命中卡片 → 开始拖动；未命中 → 取消激活。
+/// 鼠标按下：
+/// - 命中**标题栏** → 开始卡片拖动（仅标题栏可拖动整卡）；
+/// - 命中**文本文件行** → **立即用内置编辑器打开**（预览即打开）；按住超过
+///   单击阈值后松开 = 预览结束（关闭）；快速松开 = 正常打开；按住移动 = 拖动；
+/// - 命中**非文本文件行 / 子目录行** → 记录按下（抬起时单击处理）；
+/// - 未命中 → 取消激活。
 fn on_lbuttondown(hwnd: HWND, x: i32, y: i32) -> (Action, bool) {
+    // 记录按下状态（借用内先取数据，借用外统一赋值，避免借用冲突）；
+    // enter_editor_mode / open_temp_card 在借用外调用
+    let mut open_editor: Option<(String, Option<usize>)> = None;
+    let mut open_subcard: Option<String> = None;
+    let mut press_info: Option<(usize, usize, Option<String>, Option<usize>, bool, bool, Option<String>)> = None;
     let hit = SHELL.with(|s| {
         let mut sh = s.borrow_mut();
         let hit = cards::hit_test(x, y, &sh.core.cards);
         if let Some(hit) = hit {
+            sh.core.hover = None;
+            sh.row_press = None;
             if let Some(card) = sh.core.cards.get(hit.card) {
-                sh.core.drag = Some(DragState {
-                    card: hit.card,
-                    row: hit.row,
-                    grab_dx: x - card.rect.x,
-                    grab_dy: y - card.rect.y,
-                    start_x: x,
-                    start_y: y,
-                    moved: false,
-                });
-                sh.core.hover = None;
+                let real = card.row_of(hit.row);
+                match &card.rows[real] {
+                    CardRow::DirHeader => {
+                        // 标题栏：卡片拖动
+                        sh.core.drag = Some(DragState {
+                            card: hit.card,
+                            row: hit.row,
+                            grab_dx: x - card.rect.x,
+                            grab_dy: y - card.rect.y,
+                            start_x: x,
+                            start_y: y,
+                            moved: false,
+                        });
+                    }
+                    CardRow::File { path, .. } => {
+                        let skatch_index = if card.skatch { Some(real - 1) } else { None };
+                        let is_text = is_text_file(path);
+                        let mut was_open = false;
+                        if skatch_index.is_some() {
+                            // skatch 段落：总是打开/重新定位到该段
+                            open_editor = Some((path.clone(), skatch_index));
+                        } else if is_text {
+                            // 普通文本：已打开同文件 → 不重开（松开单击时 toggle 关闭）
+                            let same = sh
+                                .core
+                                .editor
+                                .as_ref()
+                                .map_or(false, |e| e.path == *path);
+                            if same {
+                                was_open = true;
+                            } else {
+                                open_editor = Some((path.clone(), None));
+                            }
+                        }
+                        press_info = Some((
+                            hit.card,
+                            hit.row,
+                            Some(path.clone()),
+                            skatch_index,
+                            is_text,
+                            was_open,
+                            None,
+                        ));
+                    }
+                    CardRow::SubDir { name } => {
+                        // 子目录行：按下即显示子卡（预览），松开判定保留/关闭
+                        let sub_dir = format!("{}/{}", card.dir_path, name);
+                        open_subcard = Some(sub_dir.clone());
+                        press_info = Some((
+                            hit.card,
+                            hit.row,
+                            None,
+                            None,
+                            false,
+                            false,
+                            Some(sub_dir),
+                        ));
+                    }
+                }
             }
         }
         hit
     });
+    if let Some((card, row, path, skatch_index, _is_text, was_open, subcard_dir)) = press_info {
+        // 子卡预览：按下立即打开/关闭（toggle），并记录本次是否处于"打开"态
+        let mut subcard_opened = false;
+        if let Some(sub) = &open_subcard {
+            open_temp_card(sub, (x + 24, y + 24));
+            subcard_opened = SHELL.with(|s| {
+                s.borrow()
+                    .core
+                    .cards
+                    .iter()
+                    .any(|c| c.temp && c.dir_path == *sub)
+            });
+        }
+        SHELL.with(|s| {
+            s.borrow_mut().row_press = Some(RowPress {
+                card,
+                row,
+                start_x: x,
+                start_y: y,
+                moved: false,
+                press_at: std::time::Instant::now(),
+                path,
+                skatch_index,
+                was_open,
+                subcard_dir,
+                subcard_opened,
+            });
+        });
+    }
     match hit {
         Some(_) => {
             unsafe {
                 SetCapture(hwnd);
             }
             raise_input_window();
+            // 文本文件：按下即打开编辑器（预览；skatch 带段落下标定位）
+            if let Some((path, idx)) = open_editor {
+                enter_editor_mode(&path, idx);
+            }
             (Action::None, true)
         }
         None => (Action::Deactivate, false),
     }
 }
 
-/// 鼠标抬起：未位移 = 点击（打开/编辑/临时子卡片/新建）；已位移 = 拖动结束保存位置。
+/// 鼠标抬起：
+/// - 内容行按下（文件/子目录）：预览中 → 关预览；已拖动 → 文件移动/取消；
+///   未移动 → 单击（打开 / 编辑 / 开子卡）；
+/// - 标题栏拖动：已位移 → 保存位置；否则点击（打开文件夹 / 加号新建）。
 fn on_lbuttonup(x: i32, y: i32) -> (Action, bool) {
-    // 先取出拖动状态并释放借用；ReleaseCapture 会同步发 WM_CAPTURECHANGED（重入）
+    // 内容行按下（先取出并释放借用；ReleaseCapture 会同步发 WM_CAPTURECHANGED）
+    let press = SHELL.with(|s| s.borrow_mut().row_press.take());
+    if let Some(p) = press {
+        unsafe {
+            ReleaseCapture();
+        }
+        // 子卡预览：拖动或长按松开 → 关闭按下时打开的子卡
+        if (p.moved || p.press_at.elapsed().as_millis() >= CLICK_MS) && p.subcard_opened {
+            close_subcard_preview(p.subcard_dir.as_deref().unwrap_or_default());
+        }
+        // 子目录行：开/关已由按下时完成（预览），松开不再走单击解析（防二次触发）
+        if p.subcard_dir.is_some() {
+            return (Action::None, true);
+        }
+        if p.moved {
+            // 拖动结束：源是文件 → 移动/抽取/并入；子目录行拖动 → 取消
+            if p.path.is_some() {
+                return (move_note_action(&p, x, y), true);
+            }
+            return (Action::None, true);
+        }
+        // 未拖动：区分"长按预览"与"正常单击"
+        let long_press = p.press_at.elapsed().as_millis() >= CLICK_MS;
+        if long_press && p.path.is_some() {
+            // 长按后松开 = 预览结束：关闭内置编辑器（若有改动会自动保存）
+            let in_editor = SHELL.with(|s| s.borrow().core.editor.is_some());
+            if in_editor {
+                exit_editor_mode();
+            }
+            return (Action::None, true);
+        }
+        if p.path.is_some() && !long_press {
+            // 快速单击文本文件：按下前已打开同文件 → toggle 关闭；否则保持；
+            // 非文本文件：系统打开
+            let is_text = SHELL.with(|s| {
+                s.borrow()
+                    .core
+                    .cards
+                    .get(p.card)
+                    .and_then(|card| card.rows.get(card.row_of(p.row)))
+                    .map(|r| match r {
+                        CardRow::File { path, .. } => is_text_file(path),
+                        _ => false,
+                    })
+                    .unwrap_or(false)
+            });
+            if !is_text {
+                let path = p.path.clone().unwrap_or_default();
+                return (
+                    if path.is_empty() {
+                        Action::None
+                    } else {
+                        Action::Open(path)
+                    },
+                    true,
+                );
+            }
+            // 文本：按下前已打开同文件（普通文件）→ toggle 关闭；否则保持
+            if p.was_open && p.skatch_index.is_none() {
+                exit_editor_mode();
+                return (Action::None, true);
+            }
+            return (Action::None, true); // 文本：编辑器已在按下时打开/定位
+        }
+        // 单击：解析真实行 → 动作
+        let action = SHELL.with(|s| {
+            let sh = s.borrow();
+            sh.core.cards.get(p.card).and_then(|card| {
+                let real = card.row_of(p.row);
+                card.rows.get(real).map(|row| match row {
+                    CardRow::SubDir { name } => Action::OpenTempCard {
+                        dir_path: format!("{}/{}", card.dir_path, name),
+                        // 以鼠标位置为基准偏移，新卡不遮挡鼠标所在处
+                        at: (x + 24, y + 24),
+                    },
+                    CardRow::File { path, .. } => {
+                        if is_text_file(path) {
+                            // 内容由 core 经 IPC 提供，路径直接用 core 侧路径（跨机器可编辑）
+                            Action::EnterEditor(path.clone())
+                        } else {
+                            Action::Open(path.clone())
+                        }
+                    }
+                    CardRow::DirHeader => Action::Open(card.dir_path.clone()),
+                })
+            })
+        });
+        return (action.unwrap_or(Action::Deactivate), false);
+    }
+
+    // 标题栏卡片拖动
     let drag = SHELL.with(|s| s.borrow_mut().core.drag.take());
     let Some(drag) = drag else {
         return (Action::None, false);
@@ -1357,39 +1860,107 @@ fn on_lbuttonup(x: i32, y: i32) -> (Action, bool) {
         save_positions();
         return (Action::None, false);
     }
-    // 点击：先判右上角加号（位置固定，滚动后仍生效），再解析真实行
+    // 点击标题栏：先判右上角加号（位置固定，滚动后仍生效），再打开文件夹
     let action = SHELL.with(|s| {
         let sh = s.borrow();
-        let params = sh.params.clone();
         sh.core.cards.get(drag.card).and_then(|card| {
+            let params = sh.params.clone();
             if cards::title_plus_rect(card, &params).map_or(false, |p| p.contains(x, y)) {
                 return Some(Action::NewNote(card.dir_path.clone()));
             }
-            let real = card.row_of(drag.row);
-            card.rows.get(real).map(|row| match row {
-                CardRow::DirHeader => Action::Open(card.dir_path.clone()),
-                CardRow::SubDir { name } => Action::OpenTempCard {
-                    dir_path: format!("{}/{}", card.dir_path, name),
-                    at: (card.rect.x + 40, card.rect.y + 40),
-                },
-                CardRow::File { path, .. } => {
-                    if is_text_file(path) {
-                        // 内容由 core 经 IPC 提供，路径直接用 core 侧路径（跨机器可编辑）
-                        Action::EnterEditor(path.clone())
-                    } else {
-                        Action::Open(path.clone())
-                    }
-                }
-            })
+            Some(Action::Open(card.dir_path.clone()))
         })
     });
     (action.unwrap_or(Action::Deactivate), false)
 }
 
-/// 鼠标移动：拖动中 → 移动卡片；否则更新悬停。返回是否需要重绘。
-fn on_mouse_move(hwnd: HWND, x: i32, y: i32) -> bool {
-    SHELL.with(|s| {
+/// 关闭子卡预览（长按/拖动松开时）：移除临时卡并清除其置顶。
+fn close_subcard_preview(dir_path: &str) {
+    let hwnd = SHELL.with(|s| {
         let mut sh = s.borrow_mut();
+        sh.core.cards.retain(|c| !(c.temp && c.dir_path == dir_path));
+        if sh.core.subcard_top.as_deref() == Some(dir_path) {
+            sh.core.subcard_top = None;
+        }
+        sh.hwnd
+    });
+    render_overlay(hwnd);
+}
+
+/// 文件行拖动结束：
+/// - 松在**目录卡片**上：普通文件 → 跨目录移动；skatch 段落 → 抽取成独立文件；
+/// - 松在 **skatch 卡片**上：普通文件 → 内容并入 skatch 末尾（删除原文件）；
+///   skatch 段落 → 取消；
+/// - 松在空白处 → 取消。
+fn move_note_action(p: &RowPress, x: i32, y: i32) -> Action {
+    let src_path = p.path.clone().unwrap_or_default();
+    let src_is_skatch = p.skatch_index.is_some();
+    let (target_dir, target_is_skatch) = SHELL.with(|s| {
+        let sh = s.borrow();
+        let hit = cards::hit_test(x, y, &sh.core.cards);
+        match hit {
+            Some(h) => (
+                sh.core.cards[h.card].dir_path.clone(),
+                sh.core.cards[h.card].skatch,
+            ),
+            None => (String::new(), false),
+        }
+    });
+    if target_dir.is_empty() {
+        return Action::None; // 空白处
+    }
+    if target_is_skatch {
+        // 目标 = skatch：普通文件 → 并入；skatch 段落 → 取消
+        if src_is_skatch {
+            return Action::None;
+        }
+        return Action::SkatchInsert { from: src_path };
+    }
+    // 目标 = 目录卡片
+    if src_is_skatch {
+        // skatch 段落 → 抽取成独立文件
+        return Action::SkatchExtract {
+            dir: target_dir,
+            index: p.skatch_index.unwrap_or(0),
+        };
+    }
+    let src_dir = SHELL.with(|s| {
+        s.borrow()
+            .core
+            .cards
+            .get(p.card)
+            .map(|c| c.dir_path.clone())
+            .unwrap_or_default()
+    });
+    if src_dir == target_dir {
+        return Action::None; // 同目录
+    }
+    Action::MoveNote {
+        from: src_path,
+        to_dir: target_dir,
+    }
+}
+
+/// 鼠标移动：标题栏拖动 → 移动卡片；文件/子目录行按下 → 超阈值进入拖动；
+/// 否则更新悬停。返回是否需要重绘。
+fn on_mouse_move(hwnd: HWND, x: i32, y: i32) -> bool {
+    // 拖动开始瞬间需要关闭按下时打开的编辑器预览（借用外调用）
+    let mut close_editor_preview = false;
+    let changed = SHELL.with(|s| {
+        let mut sh = s.borrow_mut();
+        // 内容行按下：超过阈值 → 标记 moved（进入拖动）；按下时打开的
+        // 编辑器预览随之关闭（无改动，不触发总览刷新）
+        // 先取编辑器状态（避免与 row_press 可变借用冲突）
+        let editor_open = sh.core.editor.is_some();
+        if let Some(rp) = sh.row_press.as_mut() {
+            if !rp.moved && (x - rp.start_x).abs() + (y - rp.start_y).abs() >= DRAG_THRESHOLD {
+                rp.moved = true;
+                close_editor_preview = editor_open;
+            }
+            if rp.moved {
+                return true; // 拖动中：目标高亮需随鼠标重绘
+            }
+        }
         // 先拷贝拖动信息，避免同时可变借用 drag 与 cards
         let drag_info = sh
             .core
@@ -1413,9 +1984,27 @@ fn on_mouse_move(hwnd: HWND, x: i32, y: i32) -> bool {
             }
             return true;
         }
-        // 悬停高亮（拖动时不更新）
+        // 悬停高亮（拖动时不更新）；hover 过的卡片进入置顶层（保持置顶）
         let hover = cards::hit_test(x, y, &sh.core.cards);
         if hover != sh.core.hover {
+            if let Some(h) = hover {
+                let dp = sh.core.cards[h.card].dir_path.clone();
+                sh.core.top.retain(|t| *t != dp);
+                sh.core.top.push(dp.clone());
+                // 子卡置顶：hover 父卡或子卡 → 保持；否则退出置顶
+                if let Some(sub) = sh.core.subcard_top.clone() {
+                    let parent = sub
+                        .rsplit_once('/')
+                        .map(|(p, _)| p.to_string())
+                        .unwrap_or_default();
+                    if dp != sub && dp != parent {
+                        sh.core.subcard_top = None;
+                    }
+                }
+            } else {
+                // 移出所有卡片：子卡不再置顶
+                sh.core.subcard_top = None;
+            }
             sh.core.hover = hover;
             unsafe {
                 let mut tme: TRACKMOUSEEVENT = std::mem::zeroed();
@@ -1427,7 +2016,11 @@ fn on_mouse_move(hwnd: HWND, x: i32, y: i32) -> bool {
             return true;
         }
         false
-    })
+    });
+    if close_editor_preview {
+        exit_editor_mode();
+    }
+    changed
 }
 
 /// 判断路径是否为文本文件（用内置编辑器打开）。
@@ -1502,6 +2095,64 @@ unsafe extern "system" fn edit_wndproc(
             }
         }
     }
+    // 编辑器内 hover 联动（skatch 模式）：鼠标所在字符 → 段落 → 卡片指示条
+    if msg == WM_MOUSEMOVE || msg == WM_MOUSELEAVE {
+        let skatch_mode = SHELL.with(|s| {
+            let st = s.borrow();
+            hwnd == st.edit_editor
+                && st.core
+                    .editor
+                    .as_ref()
+                    .map_or(false, |e| e.skatch_index.is_some())
+        });
+        if skatch_mode {
+            let hit: Option<usize> = if msg == WM_MOUSEMOVE {
+                unsafe {
+                    // 注册 leave 跟踪（离开编辑区时清除指示）
+                    let mut tme: TRACKMOUSEEVENT = std::mem::zeroed();
+                    tme.cbSize = size_of::<TRACKMOUSEEVENT>() as u32;
+                    tme.dwFlags = TME_LEAVE;
+                    tme.hwndTrack = hwnd;
+                    TrackMouseEvent(&mut tme);
+                    let pt = POINT {
+                        x: (lparam & 0xffff) as i32 as i16 as i32,
+                        y: ((lparam >> 16) & 0xffff) as i32 as i16 as i32,
+                    };
+                    let cp = SendMessageW(hwnd, EM_CHARFROMPOS, 0, &pt as *const POINT as isize)
+                        as usize
+                        & 0xffff;
+                    SHELL.with(|s| {
+                        let st = s.borrow();
+                        let content = st.core.editor.as_ref().map(|e| e.content.clone());
+                        content.map(|c| {
+                            // RichEdit 内部为 CRLF：把内容按显示文本（\n → \r\n）
+                            // 转 UTF-16，cp 前的 \r 数量即行号（按行分段的段号）
+                            let disp: Vec<u16> = c.replace('\n', "\r\n").encode_utf16().collect();
+                            disp[..cp.min(disp.len())]
+                                .iter()
+                                .filter(|&&u| u == 0x0D)
+                                .count()
+                        })
+                    })
+                }
+            } else {
+                None
+            };
+            let changed = SHELL.with(|s| {
+                let mut sh = s.borrow_mut();
+                if sh.nav_hover != hit {
+                    sh.nav_hover = hit;
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                let overlay = SHELL.with(|s| s.borrow().hwnd);
+                render_overlay(overlay);
+            }
+        }
+    }
     let old = SHELL.with(|s| {
         let st = s.borrow();
         if hwnd == st.edit_editor {
@@ -1516,7 +2167,29 @@ unsafe extern "system" fn edit_wndproc(
     }
 }
 
+/// 编辑器路径显示：**远程模式**（服务地址非回环）显示 `<host>:<目录内相对路径>`，
+/// 本机模式显示完整路径。
+fn display_editor_path(path: &str, root: Option<&str>) -> String {
+    let host = ipc::server_addr()
+        .rsplit_once(':')
+        .map(|(h, _)| h.to_string())
+        .unwrap_or_default();
+    let remote = !host.is_empty() && host != "localhost" && host != "127.0.0.1" && host != "::1";
+    if remote {
+        let rel = root
+            .and_then(|r| path.strip_prefix(r))
+            .map(|p| p.trim_start_matches(['/', '\\']).to_string())
+            .unwrap_or_else(|| path.to_string());
+        format!("{host}:{rel}")
+    } else {
+        path.to_string()
+    }
+}
+
 /// 编辑器窗口布局（给定窗口尺寸，返回编辑区与三个自绘按钮的矩形）。
+///
+/// - 头部一行：文件名输入框（左）· 保存（中）· ✕（右）；
+/// - 底栏一行：「打开目录」按钮在右端，与路径文字同区。
 fn editor_layout(w: i32, h: i32) -> (Rect, Rect, Rect, Rect) {
     // 编辑区：上分隔线之下、下分割线之上（不与路径/按钮功能区重叠）
     let edit = Rect {
@@ -1525,25 +2198,25 @@ fn editor_layout(w: i32, h: i32) -> (Rect, Rect, Rect, Rect) {
         w: w - 28,
         h: h - EDITOR_HEADER_H - 76,
     };
-    let btn_y = h - 40;
-    // 打开所在位置（左）· 保存（中）· ✕（右）
-    let location = Rect {
-        x: 14,
-        y: btn_y,
-        w: 132,
-        h: EDITOR_BTN_H,
-    };
+    // 头部尾：保存（中）· ✕（右），与文件名输入框同一行
     let save = Rect {
-        x: 14 + 132 + EDITOR_BTN_GAP,
-        y: btn_y,
+        x: w - 126,
+        y: 8,
         w: 84,
         h: EDITOR_BTN_H,
     };
     let close = Rect {
-        x: w - 48,
-        y: btn_y,
+        x: w - 38,
+        y: 8,
         w: 34,
         h: EDITOR_BTN_H,
+    };
+    // 底栏右端：「打开目录」按钮（与路径文字同底栏，右对齐）
+    let location = Rect {
+        x: w - 104,
+        y: h - 58,
+        w: 90,
+        h: 28,
     };
     (edit, location, save, close)
 }
@@ -1659,28 +2332,27 @@ unsafe extern "system" fn input_wndproc(
                     FillRect(hdc, &line2, line2_brush);
                     DeleteObject(line2_brush);
 
-                    // 底部按钮行上方：完整路径（弱化小字）
+                    // 底栏：路径（弱化小字；远程时显示 <host>:<目录内路径>）
                     let path = SHELL.with(|s| {
                         s.borrow()
                             .core
                             .editor
                             .as_ref()
-                            .map(|ed| ed.path.clone())
+                            .map(|ed| display_editor_path(&ed.path, ed.root.as_deref()))
                             .unwrap_or_default()
                     });
-                    let btn_y = h - 40;
                     let mut path_r = RECT {
                         left: 18,
-                        top: btn_y - 22,
-                        right: w - 18,
-                        bottom: btn_y - 6,
+                        top: h - 60,
+                        right: w - 120,
+                        bottom: h - 30,
                     };
                     draw_text(hdc, &path, &mut path_r, rgb(140, 146, 158), SHELL.with(|s| s.borrow().card_font));
 
-                    // 三个自绘按钮（悬停态来自 SHELL.btn_hover）
+                    // 自绘按钮：头部尾 = 保存/✕，底栏右端 = 打开目录
                     let (_, location, save, close) = editor_layout(w, h);
                     let hover = SHELL.with(|s| s.borrow().btn_hover);
-                    draw_button(hdc, &location, "打开所在位置", hover == BTN_LOCATION, false);
+                    draw_button(hdc, &location, "打开目录", hover == BTN_LOCATION, false);
                     draw_button(hdc, &save, "保存", hover == BTN_SAVE, true);
                     draw_button(hdc, &close, "✕", hover == BTN_CLOSE, false);
                 } else {
@@ -1712,7 +2384,7 @@ unsafe extern "system" fn input_wndproc(
             }
             0
         }
-        // 自绘按钮悬停（编辑器模式）
+        // 自绘按钮悬停（编辑器模式）+ skatch 导航条 hover 联动
         WM_MOUSEMOVE => {
             let x = (lparam & 0xffff) as i32 as i16 as i32;
             let y = ((lparam >> 16) & 0xffff) as i32 as i16 as i32;
@@ -1740,19 +2412,24 @@ unsafe extern "system" fn input_wndproc(
         WM_MOUSELEAVE => {
             let changed = SHELL.with(|s| {
                 let mut st = s.borrow_mut();
+                let mut c = false;
                 if st.btn_hover != 0 {
                     st.btn_hover = 0;
-                    true
-                } else {
-                    false
+                    c = true;
                 }
+                if st.nav_hover.take().is_some() {
+                    c = true;
+                }
+                c
             });
             if changed {
                 unsafe { InvalidateRect(hwnd, null_mut(), 0) };
+                let overlay = SHELL.with(|s| s.borrow().hwnd);
+                render_overlay(overlay);
             }
             0
         }
-        // 深色背景（配合 EDIT 的 WM_CTLCOLOREDIT）
+        // 深色背景（配合 EDIT 的 WM_CTLCOLOREDIT / RichEdit 的 WM_CTLCOLOR）
         WM_ERASEBKGND => {
             let dark = SHELL.with(|s| s.borrow().dark_brush);
             unsafe {
@@ -1764,6 +2441,15 @@ unsafe extern "system" fn input_wndproc(
         }
         // EDIT 深色配色：白字 + 深底
         WM_CTLCOLOREDIT => {
+            unsafe {
+                let hdc = wparam as HDC;
+                SetTextColor(hdc, rgb(235, 238, 245));
+                SetBkColor(hdc, rgb(40, 43, 50));
+            }
+            SHELL.with(|s| s.borrow().dark_brush as LRESULT)
+        }
+        // RichEdit 深色配色（发送 WM_CTLCOLOR 而非 WM_CTLCOLOREDIT）
+        WM_CTLCOLOR => {
             unsafe {
                 let hdc = wparam as HDC;
                 SetTextColor(hdc, rgb(235, 238, 245));
@@ -2502,9 +3188,72 @@ fn draw_overlay_content(hdc: HDC, sw: i32, sh: i32) {
             FillRect(hdc, &client, bg);
             DeleteObject(bg);
 
-            for (ci, card) in st.core.cards.iter().enumerate() {
-                // 每张卡片从调色板取一个强调色（临时子卡片与主卡片一致，不再单用紫色）
-                let accent = ACCENT_PALETTE[ci % ACCENT_PALETTE.len()];
+            // 文件拖动中：鼠标下的卡片作为移动目标（高亮描边）
+            let drag_target = if let Some(rp) = &st.row_press {
+                if rp.moved && rp.path.is_some() {
+                    let mut pt: POINT = std::mem::zeroed();
+                    GetCursorPos(&mut pt);
+                    cards::hit_test(pt.x, pt.y, &st.core.cards).map(|h| h.card)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            // 绘制顺序：未置顶的卡片保持原序在前；置顶过的卡片按
+            // hover 先后排在后面（最近 hover 的在最上层）。hover 卡片
+            // 天然在置顶层中（hover 时已入 top），移开后仍保持置顶。
+            let order: Vec<usize> = {
+                let mut order = Vec::with_capacity(st.core.cards.len());
+                let mut top_idx: Vec<usize> = Vec::new();
+                for (i, c) in st.core.cards.iter().enumerate() {
+                    if st.core.top.iter().any(|t| *t == c.dir_path) {
+                        top_idx.push(i);
+                    } else {
+                        order.push(i);
+                    }
+                }
+                // top 按 dir_path 顺序重排（保持 top 的先后语义）
+                let mut by_top: Vec<usize> = Vec::new();
+                for t in &st.core.top {
+                    if let Some(pos) = st.core.cards.iter().position(|c| &c.dir_path == t) {
+                        by_top.push(pos);
+                    }
+                }
+                for i in top_idx {
+                    if !by_top.contains(&i) {
+                        by_top.push(i);
+                    }
+                }
+                order.extend(by_top);
+                // 子卡置顶：无条件最上层（保持到父/子卡都不再 hover）
+                if let Some(sub) = &st.core.subcard_top {
+                    if let Some(pos) = order.iter().position(|&i| st.core.cards[i].dir_path == *sub) {
+                        let i = order.remove(pos);
+                        order.push(i);
+                    }
+                }
+                order
+            };
+            // 加号按钮 hover：鼠标在加号矩形内（独立判定，与行 hover 互不干预）
+            let mouse = || {
+                let mut pt: POINT = std::mem::zeroed();
+                GetCursorPos(&mut pt);
+                (pt.x, pt.y)
+            };
+
+            let hover_card = st.core.hover.map(|h| h.card);
+            for &ci in &order {
+                let card = &st.core.cards[ci];
+                // 每张卡片从调色板取一个强调色（临时子卡片同主卡片）；
+                // skatch 卡片用暖金色强调（与其它卡片区分）
+                let accent = if card.skatch {
+                    rgb(245, 200, 110)
+                } else {
+                    ACCENT_PALETTE[ci % ACCENT_PALETTE.len()]
+                };
+                // 任意行 hover：整卡略微高亮（强度为旧版 1/3）
+                let card_hover = hover_card == Some(ci);
                 let card_rect = to_rect(card.rect);
 
                 // 1) 卡片阴影（右下 2px 深色错位，模拟投影层次）
@@ -2518,8 +3267,9 @@ fn draw_overlay_content(hdc: HDC, sw: i32, sh: i32) {
                 fill_round_rect(hdc, &shadow_rect, 10, shadow);
                 DeleteObject(shadow);
 
-                // 2) 卡片主体（圆角深色；临时子卡片同主卡片）
-                let body_brush = CreateSolidBrush(rgb(38, 41, 48));
+                // 2) 卡片主体（圆角深色；临时子卡片同主卡片；skatch 明显偏蓝）
+                let body = if card.skatch { rgb(27, 37, 54) } else { rgb(38, 41, 48) };
+                let body_brush = CreateSolidBrush(body);
                 fill_round_rect(hdc, &card_rect, 10, body_brush);
                 DeleteObject(body_brush);
 
@@ -2550,8 +3300,17 @@ fn draw_overlay_content(hdc: HDC, sw: i32, sh: i32) {
                     DeleteObject(lbrush);
                 }
 
-                // 5) 边框（圆角描边；临时子卡片同主卡片）
-                let border = CreateSolidBrush(rgb(68, 72, 82));
+                // 5) 边框（圆角描边；临时子卡片同主卡片；skatch 偏蓝；
+                //    整卡 hover 提亮 1/3；文件拖动悬停的目标卡片用强调色描边）
+                let border = CreateSolidBrush(if card_hover {
+                    rgb(84, 90, 102)
+                } else if drag_target == Some(ci) {
+                    accent
+                } else if card.skatch {
+                    rgb(74, 84, 108)
+                } else {
+                    rgb(68, 72, 82)
+                });
                 frame_round_rect(hdc, &card_rect, 10, border);
                 DeleteObject(border);
 
@@ -2561,7 +3320,8 @@ fn draw_overlay_content(hdc: HDC, sw: i32, sh: i32) {
                     r.left += 16;
                     r.right -= 8;
                     let is_hover = st.core.hover == Some(Hit { card: ci, row: ri });
-                    if is_hover {
+                    // 标题行 hover 不用深色条（整卡高亮替代）；内容行保持贯通阴影条
+                    if is_hover && card.row_of(ri) != 0 {
                         // 悬停：左右贯通的直角阴影条（右缘给滚动条留 8px）
                         let hover_rect = RECT {
                             left: card_rect.left + 1,
@@ -2609,6 +3369,21 @@ fn draw_overlay_content(hdc: HDC, sw: i32, sh: i32) {
                             draw_text(hdc, &label, &mut r, rgb(105, 205, 150), st.card_font);
                         }
                         CardRow::File { title, .. } => {
+                            // skatch 卡片：编辑器导航条 hover 的对应段落行画指示条
+                            let nav_idx = st.nav_hover;
+                            if card.skatch
+                                && nav_idx == Some(real.saturating_sub(1))
+                            {
+                                let ind = RECT {
+                                    left: card_rect.left + 1,
+                                    top: row_rect.y + 1,
+                                    right: card_rect.right - 8,
+                                    bottom: row_rect.y + row_rect.h - 1,
+                                };
+                                let ind_brush = CreateSolidBrush(rgb(52, 74, 100));
+                                FillRect(hdc, &ind, ind_brush);
+                                DeleteObject(ind_brush);
+                            }
                             // 文件行：小方点 + 弱化文字
                             let dot = RECT {
                                 left: card_rect.left + 14,
@@ -2626,18 +3401,20 @@ fn draw_overlay_content(hdc: HDC, sw: i32, sh: i32) {
                     }
                 }
 
-                // 7) 卡片右上角「新建笔记」加号（位置固定，滚动后仍可见）
+                // 7) 卡片右上角「新建笔记」加号（位置固定，滚动后仍可见；
+                //    hover 独立判定：鼠标在加号矩形内才亮）
                 if let Some(plus) = cards::title_plus_rect(card, params) {
-                    let card_hover = st.core.hover.map_or(false, |h| h.card == ci);
+                    let (mx, my) = mouse();
+                    let plus_hover = plus.contains(mx, my);
                     let plus_rect = to_rect(plus);
-                    let plus_brush = CreateSolidBrush(if card_hover {
+                    let plus_brush = CreateSolidBrush(if plus_hover {
                         rgb(62, 68, 80)
                     } else {
                         rgb(46, 50, 58)
                     });
                     fill_round_rect(hdc, &plus_rect, 5, plus_brush);
                     DeleteObject(plus_brush);
-                    let plus_border = CreateSolidBrush(if card_hover {
+                    let plus_border = CreateSolidBrush(if plus_hover {
                         rgb(110, 120, 135)
                     } else {
                         rgb(70, 75, 86)
@@ -2995,6 +3772,8 @@ impl ShellState {
             hotkey: None,
             overlay_visible: false,
             pending_new_note: None,
+            row_press: None,
+            nav_hover: None,
         }
     }
 }

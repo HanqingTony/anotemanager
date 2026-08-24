@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "anm-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anm-core",
  "anyhow",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "anm-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "anm-tray-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anm-core",
  "anyhow",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "anm-tray-win"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anm-core",
  "anm-tray-core",

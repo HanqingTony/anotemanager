@@ -43,6 +43,16 @@ pub enum Request {
     CreateNote { dir: String, title: String },
     /// 同目录内重命名一篇笔记（托盘编辑器改名用；**人机通道**，MCP 不暴露）
     RenameNote { from: String, to: String },
+    /// skatch 总览：默认 inbox 文件的段落列表（空行分隔；托盘 skatch 卡片用）
+    Skatch,
+    /// 跨目录移动笔记文件（托盘文件行拖动用；**人机通道**，MCP 不暴露）
+    MoveNote { from: String, to_dir: String },
+    /// 从 skatch 抽取段落为独立文件（托盘把段落拖到目录卡片时用；
+    /// **人机通道**，MCP 不暴露）
+    SkatchExtract { dir: String, index: usize },
+    /// 把笔记文件内容并入 skatch 末尾并删除原文件（托盘把文件拖到
+    /// skatch 卡片时用；**人机通道**，MCP 不暴露）
+    SkatchInsert { from: String },
 }
 /// IPC 信封：请求 + 可选访问令牌（服务端配置 `[server] token` 后校验）。
 ///
@@ -133,6 +143,18 @@ mod tests {
             Request::RenameNote {
                 from: "idea/a.md".into(),
                 to: "idea/b.md".into(),
+            },
+            Request::Skatch,
+            Request::MoveNote {
+                from: "idea/a.md".into(),
+                to_dir: "ref".into(),
+            },
+            Request::SkatchExtract {
+                dir: "idea".into(),
+                index: 0,
+            },
+            Request::SkatchInsert {
+                from: "idea/a.md".into(),
             },
         ];
         for req in cases {

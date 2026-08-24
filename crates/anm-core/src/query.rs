@@ -34,6 +34,21 @@ fn is_note_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// skatch（inbox）文件的段落列表：**按行分段**——`\r` / `\n` 都是分隔符，
+/// 每行（去除首尾空白后非空）即一个段落。
+///
+/// 不做任何格式识别（短行 / `##` 标题行都与普通行同等对待）；读取时先把
+/// `\r\n` 规范化为 `\n`（内置编辑器基于 RichEdit 保存时可能写入 CRLF）。
+pub fn skatch_segments(path: &std::path::Path) -> Result<Vec<String>> {
+    let text = std::fs::read_to_string(path)?;
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    Ok(text
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
 /// 判断路径是否指向一篇笔记文件（扩展名在 `NOTE_EXTENSIONS` 内且非隐藏文件）。
 /// 供 MCP / daemon 等入口在路径白名单之上做「只读笔记」的二次校验。
 pub fn is_note_path(path: &Path) -> bool {

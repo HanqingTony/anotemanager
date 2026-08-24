@@ -36,6 +36,10 @@ pub struct EditorState {
     /// 正在编辑的笔记路径（**core 侧路径**，即总览/搜索返回的原始路径；
     /// 读写一律经 IPC 由 anm-core 完成，托盘不直接访问文件系统）
     pub path: String,
+    /// 笔记系统根目录（ReadNote 响应随附；用于显示"目录内相对路径"）
+    pub root: Option<String>,
+    /// 打开时选中的 skatch 段落下标（skatch 模式编辑器定位用）
+    pub skatch_index: Option<usize>,
     /// 当前编辑缓冲区内容
     pub content: String,
     /// 是否有未保存的改动
@@ -59,6 +63,12 @@ pub enum Action {
     /// 新建笔记（卡片标题行「+」按钮）：外壳进入新建模式（输入框预填目录），
     /// 提交后经 IPC `CreateNote` 创建并刷新总览
     NewNote(String),
+    /// 跨目录移动笔记文件（文件行拖到另一张卡片上松开）
+    MoveNote { from: String, to_dir: String },
+    /// 从 skatch 抽取段落为独立文件（段落行拖到目录卡片上松开）
+    SkatchExtract { dir: String, index: usize },
+    /// 把文件内容并入 skatch 末尾并删除原文件（文件行拖到 skatch 卡片上松开）
+    SkatchInsert { from: String },
     /// 保存卡片位置记忆（外壳调用持久化）
     SavePositions,
 }
@@ -74,6 +84,11 @@ pub struct TrayState {
     pub positions: HashMap<String, (i32, i32)>,
     /// 已保存的卡片滚动位置（目录路径 → 滚动行数，跨激活记忆；不含临时卡片）
     pub scrolls: HashMap<String, usize>,
+    /// 置顶层顺序（目录路径，最近 hover 的在末尾 = 最上层；hover 过后保持置顶）
+    pub top: Vec<String>,
+    /// 临时子卡片置顶（目录路径）：打开时置顶，直到父卡片与子卡片都不再
+    /// hover 才退出置顶
+    pub subcard_top: Option<String>,
     /// 悬停中的卡片可见行（`None` 表示无悬停）
     pub hover: Option<Hit>,
     /// 正在拖动的卡片（`None` 表示未在拖动）
@@ -138,7 +153,13 @@ impl TrayState {
 ///
 /// 内容由 anm-core 从服务端读取（跨机器也能编辑，不需要本地有这份文件）；
 /// 失败（服务未启动 / 文件不可读等）时返回错误文本，状态不变。
-pub fn enter_editor(state: &mut TrayState, core_path: &str) -> Result<(), String> {
+///
+/// `skatch_index`：从 skatch 卡片点开时传入所选段落下标（`None` = 普通笔记）。
+pub fn enter_editor(
+    state: &mut TrayState,
+    core_path: &str,
+    skatch_index: Option<usize>,
+) -> Result<(), String> {
     let data = ipc::call(&Request::ReadNote { path: core_path.to_string() })
         .map_err(|e| format!("读取失败: {e}"))?;
     let content = data
@@ -146,15 +167,57 @@ pub fn enter_editor(state: &mut TrayState, core_path: &str) -> Result<(), String
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    let root = data.get("root").and_then(|v| v.as_str()).map(|r| r.to_string());
     state.editor = Some(EditorState {
         path: core_path.to_string(),
+        root,
         content,
         dirty: false,
+        skatch_index,
     });
     state.result.clear();
     state.error.clear();
     Ok(())
 }
+
+/// 计算第 `index` 段落在文本中的起始 UTF-16 单元偏移（按 `\n` 行分段，
+/// 与 core 的 skatch 分段规则一致；偏移指向行首第一个非空白字符）。
+///
+/// **平台无关**：偏移基于**传入文本自身的换行约定**（LF 文本每行 +1；
+/// Windows 平台把内容转成 CRLF 显示文本后再传入，每行自然 +2）。越界
+/// 返回 `None`。
+pub fn skatch_segment_offset(content: &str, index: usize) -> Option<usize> {
+    let mut offset = 0usize;
+    for (i, line) in content.split('\n').enumerate() {
+        let trimmed = line.trim_start();
+        let lead_ws = line[..line.len() - trimmed.len()].encode_utf16().count();
+        let start = offset + lead_ws;
+        if i == index {
+            return Some(start);
+        }
+        offset += line.encode_utf16().count() + 1; // 行(UTF-16) + 换行符
+    }
+    None
+}
+
+/// 把 UTF-16 单元下标换算为 UTF-8 字节偏移（hover 定位段落用；
+/// 避免用 UTF-16 下标直接切 UTF-8 字符串导致中文边界 panic）。
+pub fn utf16_to_byte(content: &str, cp: usize) -> usize {
+    let mut units = 0usize;
+    for (bi, ch) in content.char_indices() {
+        let u = ch.len_utf16();
+        if units + u > cp {
+            // 光标落在字符内部（代理对中间）→ 按该字符结束处理
+            return bi + ch.len_utf8();
+        }
+        units += u;
+        if units == cp {
+            return bi + ch.len_utf8();
+        }
+    }
+    content.len()
+}
+
 
 /// 用外壳读到的编辑框文本同步编辑器缓冲区（标记 dirty）。
 pub fn editor_set_content(state: &mut TrayState, content: &str) {
@@ -256,4 +319,33 @@ fn apply_rename(ed: &mut EditorState, new_name: &str) -> Result<bool, String> {
     .map_err(|e| format!("重命名失败: {e}"))?;
     ed.path = new_path;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// UTF-16 偏移：中文内容下与字节偏移不同（EM_SETSEL 用 UTF-16）。
+    #[test]
+    fn skatch_segment_offset_is_utf16() {
+        // 按行分段（LF 语义）：第一行偏移 0；
+        // 第二行起始 = 第一行(3 汉字 = 3 UTF-16) + 换行(1)
+        let c = "第一条\n## 小节\n内容";
+        assert_eq!(skatch_segment_offset(c, 0), Some(0));
+        assert_eq!(skatch_segment_offset(c, 1), Some(4));
+        // "## 小节" = 5 个 UTF-16 单元（# # 空格 小 节）
+        assert_eq!(skatch_segment_offset(c, 2), Some(4 + 5 + 1));
+        assert!(skatch_segment_offset(c, 9).is_none());
+        // CRLF 显示文本：每行行尾多一个 \r，偏移自然 +2
+        let crlf = "第一条\r\n## 小节\r\n内容";
+        assert_eq!(skatch_segment_offset(crlf, 1), Some(5));
+        assert_eq!(skatch_segment_offset(crlf, 2), Some(5 + 6 + 1));
+        // 前导空白跳过：行首第一个非空白字符
+        let c2 = "  首行\n次段";
+        assert_eq!(skatch_segment_offset(c2, 0), Some(2));
+        // utf16→byte：中文"你"占 1 个 UTF-16、3 字节；"你好ab" 共 8 字节
+        assert_eq!(utf16_to_byte("你好ab", 1), 3);
+        assert_eq!(utf16_to_byte("你好ab", 4), 8); // 全部消费 → 结尾
+        assert_eq!(utf16_to_byte("你好ab", 99), 8);
+    }
 }
