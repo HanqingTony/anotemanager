@@ -102,7 +102,7 @@
     background: var(--card); border: 1px solid #6a7a8f; border-radius: 12px;
     padding: 14px; display: flex; flex-direction: column; gap: 8px;
   }
-  #editor .ehead { display: flex; gap: 8px; align-items: center; }
+  #editor .ehead { display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--card-border); padding-bottom: 8px; }
   #e-name {
     flex: 1; background: transparent; border: 1px solid transparent;
     color: var(--accent); font-size: 15px; font-weight: 600;
@@ -121,7 +121,7 @@
     white-space: pre-wrap; overflow-y: auto; outline: none;
     user-select: text;
   }
-  #e-foot { display: flex; align-items: center; gap: 8px; }
+  #e-foot { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--card-border); padding-top: 8px; }
   #e-path { color: var(--text-dim); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #inputbar {
     position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
@@ -353,10 +353,12 @@ function layoutCards() {
 
 function bindDrag(card, el) {
   const head = el.querySelector('.head');
+  let downPos = null;
   head.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     // + 按钮不触发拖动
     if (e.target.classList.contains('plus')) return;
+    downPos = {x: e.clientX, y: e.clientY};
     dragging = { card, ox: e.clientX - card.x, oy: e.clientY - card.y, sx: e.clientX, sy: e.clientY };
     head.setPointerCapture(e.pointerId);
     e.preventDefault();
@@ -370,15 +372,29 @@ function bindDrag(card, el) {
     } catch (err) { showResult('拖动错误: ' + err, true); }
     e.preventDefault();
   });
-  const endDrag = () => {
+  head.addEventListener('pointerup', (e) => {
     if (!dragging || dragging.card !== card) return;
+    // 单击（未移动）标题栏 = 用系统默认方式打开目录（readme §16）；
+    // 拖动则只记位置
+    const moved = downPos && (Math.abs(e.clientX - downPos.x) >= 5 || Math.abs(e.clientY - downPos.y) >= 5);
     dragging = null;
+    downPos = null;
     clampCard(card);
     saveCardPos();
-  };
-  head.addEventListener('pointerup', endDrag);
+    if (!moved && card.dir) {
+      anmApi.openPath(card.dir).then((r) => {
+        if (r && r.data && r.data.ok === false) showToast(r.data.msg || '无法打开：' + card.dir);
+      });
+    }
+  });
   // 指针出屏/系统取消捕获时清理（否则卡片"卡死"）
-  head.addEventListener('pointercancel', endDrag);
+  head.addEventListener('pointercancel', () => {
+    if (!dragging || dragging.card !== card) return;
+    dragging = null;
+    downPos = null;
+    clampCard(card);
+    saveCardPos();
+  });
 }
 window.addEventListener('resize', () => {
   for (const c of cardModels) clampCard(c);
@@ -450,6 +466,8 @@ async function renderCards() {
   if (!e1.ok || !e2.ok) {
     showResult('IPC 失败: ' + (e1.ok ? e2.err : e1.err), true);
   }
+  // 连接状态：绿 = 最近一次 IPC 成功 / 红 = 失败（readme §16）
+  setStatus(e1.ok && e2.ok, (e1.ok && e2.ok ? '已连接 · ' : '连接失败 · ') + serverAddr);
 
   cardModels = [];
   // skatch 卡片（固定左，段落列表）
@@ -472,7 +490,6 @@ async function renderCards() {
   }
   layoutCards();
   applyNavHover();
-  setStatus(true, '已连接 · ' + serverAddr);
 }
 
 function setStatus(ok, text) {
