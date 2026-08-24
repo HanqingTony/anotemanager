@@ -180,7 +180,7 @@ let serverAddr = localStorage.getItem('anm.serverAddr') || '192.168.0.102:17370'
 let serverToken = localStorage.getItem('anm.serverToken') || null;
 
 // ---------- IPC 转发（经扩展连 anm-core） ----------
-function ipc(cmd, params) {
+function anmIpc(cmd, params) {
   return anmApi.ipc(cmd, params || {}).then((r) => {
     if (r.status === 'ok') return r.data;
     throw (r.data || '服务错误');
@@ -321,8 +321,8 @@ async function renderCards() {
   cardsEl.innerHTML = '';
   const e1 = {ok: true}, e2 = {ok: true};
   const [dirs, skatch] = await Promise.all([
-    ipc('overview').catch((err) => { e1.ok = false; e1.err = String(err); return []; }),
-    ipc('skatch').catch((err) => { e2.ok = false; e2.err = String(err); return null; }),
+    anmIpc('overview').catch((err) => { e1.ok = false; e1.err = String(err); return []; }),
+    anmIpc('skatch').catch((err) => { e2.ok = false; e2.err = String(err); return null; }),
   ]);
   if (!e1.ok || !e2.ok) {
     showResult('IPC 失败: ' + (e1.ok ? e2.err : e1.err), true);
@@ -364,7 +364,7 @@ let editingPath = null;
 
 async function openEditor(path) {
   try {
-    const data = await ipc('read_note', {path});
+    const data = await anmIpc('read_note', {path});
     editingPath = path;
     eName.value = path.split('/').pop();
     eBody.textContent = data.content;
@@ -383,12 +383,12 @@ async function saveEditor() {
   if (newName && newName !== oldName) {
     const dir = editingPath.slice(0, editingPath.length - oldName.length);
     target = dir + newName;
-    try { await ipc('rename_note', {from: editingPath, to: target}); }
+    try { await anmIpc('rename_note', {from: editingPath, to: target}); }
     catch (e) { showResult('重命名失败: ' + e, true); return; }
     editingPath = target;
   }
   try {
-    await ipc('write_note', {path: target, content: eBody.textContent});
+    await anmIpc('write_note', {path: target, content: eBody.textContent});
     showResult('已保存 ' + target);
     closeEditor();
     renderCards();
@@ -408,7 +408,7 @@ async function submitCmd() {
   cmdInput.value = '';
   if (text.startsWith('/')) { showResult('命令暂未实现: ' + text, true); return; }
   try {
-    await ipc('inbox_append', {text});
+    await anmIpc('inbox_append', {text});
     showResult('已写入 skatch');
     renderCards();
   } catch (e) { showResult(String(e), true); }
