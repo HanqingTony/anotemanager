@@ -1,1 +1,4 @@
 /target
+apps/anm-tauri/src-tauri/target/
+apps/anm-tauri/renderer/appIcon.png.bak
+apps/anm-tauri/src-tauri/gen/
