@@ -19,7 +19,7 @@
         "skipTaskbar": true,
         "resizable": false,
         "visible": true,
-        "additionalBrowserArgs": "--force-device-scale-factor=1 --remote-debugging-port=9222 --remote-allow-origins=*"
+        "additionalBrowserArgs": "--force-device-scale-factor=1"
       }
     ],
     "security": {

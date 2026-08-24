@@ -17,8 +17,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+# 注：windows-sys 0.59 中 ShellExecuteExW/SHELLEXECUTEINFOW 挂在
+# Win32_System_Registry feature 下（命名反直觉，以源码 cfg 为准）
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 strip = true

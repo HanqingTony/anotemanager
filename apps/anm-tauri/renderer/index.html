@@ -54,7 +54,7 @@
     overflow: hidden;
   }
   .card:hover { border-color: #5a6270; }
-  .card.skatch { background: #1d2431; border-color: #3c4a63; border-left: 3px solid var(--accent-warm); }
+  .card.skatch { background: #1d2431; border-color: #3c4a63; border-left: 3px solid var(--accent-warm); width: 268px; }
   .card .head {
     padding: 7px 12px;
     font-size: 14px; font-weight: 600;
@@ -66,12 +66,11 @@
   }
   .card.skatch .head { color: var(--accent-warm); }
   .card .head:active { cursor: grabbing; }
-  .card.skatch .head { color: var(--accent-warm); }
   .card .head .plus {
     margin-left: auto; width: 20px; height: 20px;
     border-radius: 5px; border: 1px solid var(--card-border);
     color: var(--text-dim); font-size: 14px; line-height: 18px; text-align: center;
-    cursor: pointer;
+    cursor: pointer; flex: none;
   }
   .card .head .plus:hover { border-color: var(--accent); color: var(--accent); }
   .rows { padding: 4px 0; overflow-y: auto; }
@@ -87,6 +86,12 @@
     background: rgba(95, 190, 255, 0.14);
     box-shadow: inset 2px 0 0 var(--accent);
   }
+  /* skatch 卡片：编辑器导航条悬停联动指示条（左右贯通） */
+  .row.nav {
+    background: rgba(52, 74, 100, 0.55);
+    box-shadow: inset 0 0 0 1px rgba(95, 190, 255, 0.25);
+  }
+  .card.temp { border-style: dashed; }
   #editor-mask {
     display: none; position: fixed; inset: 0;
     background: rgba(8, 10, 16, 0.72);
@@ -116,7 +121,8 @@
     white-space: pre-wrap; overflow-y: auto; outline: none;
     user-select: text;
   }
-  #e-path { color: var(--text-dim); font-size: 12px; padding: 0 2px; }
+  #e-foot { display: flex; align-items: center; gap: 8px; }
+  #e-path { color: var(--text-dim); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #inputbar {
     position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
     width: min(560px, calc(100vw - 80px));
@@ -137,6 +143,47 @@
   }
   #result.err { color: #ff7878; }
   .hidden { display: none !important; }
+  /* toast：右上角小窗自动隐藏 */
+  #toast {
+    position: fixed; top: 44px; right: 18px;
+    max-width: 420px; min-width: 180px;
+    background: #1c212b; border: 1px solid #5a82a5; border-radius: 10px;
+    color: var(--text); font-size: 13px; line-height: 1.5;
+    padding: 10px 14px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+    opacity: 0; transform: translateY(-6px);
+    transition: opacity 0.18s, transform 0.18s;
+    pointer-events: none; z-index: 50;
+  }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  /* 设置对话框（服务地址 / 快捷键） */
+  #settings-mask {
+    display: none; position: fixed; inset: 0;
+    background: rgba(8, 10, 16, 0.6);
+    align-items: center; justify-content: center;
+    z-index: 40;
+  }
+  #settings-box {
+    width: 420px;
+    background: var(--card); border: 1px solid #6a7a8f; border-radius: 12px;
+    padding: 18px; display: flex; flex-direction: column; gap: 12px;
+  }
+  #settings-box h3 { margin: 0; font-size: 15px; color: var(--accent); }
+  #settings-box label { font-size: 12px; color: var(--text-dim); }
+  #settings-box input {
+    width: 100%; height: 32px;
+    background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 6px;
+    color: var(--text); font-size: 14px; padding: 0 10px; outline: none; font-family: inherit;
+  }
+  #settings-box input:focus { border-color: var(--accent); }
+  .s-row { display: flex; gap: 8px; justify-content: flex-end; }
+  #hotkey-hint {
+    background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 6px;
+    padding: 10px 12px; font-size: 16px; color: var(--accent-warm); text-align: center;
+    letter-spacing: 1px; min-height: 42px; display: flex; align-items: center; justify-content: center;
+  }
+  #hotkey-err { color: #ff7878; font-size: 12px; min-height: 14px; }
+  #hotkey-hint:focus { outline: none; }
 </style>
 </head>
 <body>
@@ -158,7 +205,31 @@
         <button class="btn" id="e-close">✕</button>
       </div>
       <div id="e-body" contenteditable="true" spellcheck="false"></div>
-      <div id="e-path"></div>
+      <div id="e-foot">
+        <span id="e-path"></span>
+        <button class="btn" id="e-open-dir">打开目录</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast"></div>
+  <div id="settings-mask">
+    <div id="settings-box">
+      <h3 id="s-title">设置服务地址</h3>
+      <div id="s-settings">
+        <label>服务地址（主机:端口）</label>
+        <input id="s-addr" spellcheck="false">
+        <label>访问令牌（可选）</label>
+        <input id="s-token" spellcheck="false" type="password">
+      </div>
+      <div id="s-hotkey">
+        <label>按下新组合键（Alt/Ctrl/Shift + 键）</label>
+        <div id="hotkey-hint" tabindex="0">（等待按键…）</div>
+        <div id="hotkey-err"></div>
+      </div>
+      <div class="s-row">
+        <button class="btn" id="s-cancel">取消</button>
+        <button class="btn" id="s-ok">确定</button>
+      </div>
     </div>
   </div>
 </div>
@@ -171,15 +242,21 @@ const anmApi = (() => {
   return {
     ipc: (cmd, params) => core.invoke('anm_ipc', { cmd, params: params || {} }),
     setConfig: (cfg) => core.invoke('anm_set_config', { cfg }),
+    getConfig: () => core.invoke('anm_get_config'),
+    setHotkey: (keys) => core.invoke('anm_set_hotkey', { keys }),
+    hide: () => core.invoke('anm_hide'),
+    openPath: (path) => core.invoke('anm_open_path', { path }),
     onEvent: (cb) => { evt.listen('anm-event', (e) => cb(e.payload)); },
+    onMenu: (cb) => { evt.listen('anm-menu', (e) => cb(e.payload)); },
   };
 })();
 
 // ---------- 配置 ----------
 let serverAddr = localStorage.getItem('anm.serverAddr') || '192.168.0.102:17370';
 let serverToken = localStorage.getItem('anm.serverToken') || null;
+let serverRoot = null;   // anm-core 笔记库根（skatch 命令返回），远程路径显示用
 
-// ---------- IPC 转发（经扩展连 anm-core） ----------
+// ---------- IPC 转发 ----------
 function anmIpc(cmd, params) {
   return anmApi.ipc(cmd, params || {}).then((r) => {
     if (r.status === 'ok') return r.data;
@@ -191,10 +268,21 @@ function anmIpc(cmd, params) {
 const cardsEl = document.getElementById('cards');
 const resultEl = document.getElementById('result');
 
+// ---------- toast ----------
+let toastTimer = null;
+function showToast(text) {
+  const t = document.getElementById('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
 // ---------- 卡片（绝对定位网格 + 拖动 + 记忆） ----------
-const PAD = 0, CW = 240, GAP = 14, ROW_H = 20, HEAD_H = 33;
-let cardModels = [];   // {title, skatch, rows: [...], el, x, y, visRows}
+const PAD = 0, CW = 240, SKW = 268, GAP = 14, ROW_H = 20, HEAD_H = 33;
+let cardModels = [];   // {title, skatch, rows: [...], el, x, y, visRows, temp, dir}
 let dragging = null;   // {card, ox, oy, sx, sy}
+let navHover = null;   // skatch 编辑器导航条悬停段落下标 → 卡片指示条
 
 function loadCardPos() {
   try { return JSON.parse(localStorage.getItem('anm.cardPos') || '{}'); }
@@ -202,8 +290,20 @@ function loadCardPos() {
 }
 function saveCardPos() {
   const map = {};
-  for (const c of cardModels) map[c.title] = [Math.round(c.x), Math.round(c.y)];
+  for (const c of cardModels) {
+    if (c.temp) continue; // 临时子卡片不参与位置记忆
+    map[c.title] = [Math.round(c.x), Math.round(c.y)];
+  }
   localStorage.setItem('anm.cardPos', JSON.stringify(map));
+}
+function loadScrollPos() {
+  try { return JSON.parse(localStorage.getItem('anm.scrollPos') || '{}'); }
+  catch (e) { return {}; }
+}
+function saveScrollPos(c) {
+  const map = loadScrollPos();
+  map[c.title] = c.el.querySelector('.rows').scrollTop;
+  localStorage.setItem('anm.scrollPos', JSON.stringify(map));
 }
 
 function applyCardPos(c) {
@@ -211,8 +311,9 @@ function applyCardPos(c) {
 }
 function clampCard(c) {
   const vw = window.innerWidth, vh = window.innerHeight;
+  const w = c.skatch ? SKW : CW;
   const h = c.h || (HEAD_H + 12 * ROW_H + 8); // 防御：高度未计算时用默认
-  c.x = Math.max(0, Math.min(c.x, vw - CW));
+  c.x = Math.max(0, Math.min(c.x, vw - w));
   c.y = Math.max(0, Math.min(c.y, vh - h));
   applyCardPos(c);
 }
@@ -222,6 +323,7 @@ function layoutCards() {
   const cols = Math.max(1, Math.floor((vw - PAD * 2) / (CW + GAP)));
   const visRows = Math.max(4, Math.floor((vh - 96 - PAD * 2) / ROW_H));
   const pos = loadCardPos();
+  const scrollPos = loadScrollPos();
   let ci = 0;
   for (const c of cardModels) {
     // 每卡可见行数（内容多则卡内滚动；全部卡片完整在画布内）
@@ -230,18 +332,22 @@ function layoutCards() {
     list.style.maxHeight = (c.visRows * ROW_H + 6) + 'px';
     c.h = HEAD_H + c.visRows * ROW_H + 8; // 缓存高度（拖动 clamp 用，避免 reflow）
     c.el.style.height = c.h + 'px';
-    if (c.skatch) {
-      if (!pos[c.title]) { c.x = PAD; c.y = PAD; }
-    } else {
-      if (!pos[c.title]) {
-        const col = ci % cols, row = Math.floor(ci / cols);
-        c.x = PAD + col * (CW + GAP);
-        c.y = PAD + row * (HEAD_H + c.visRows * ROW_H + 10 + GAP);
-        ci++;
+    if (!c.temp) {
+      if (c.skatch) {
+        if (!pos[c.title]) { c.x = PAD; c.y = PAD; }
+      } else {
+        if (!pos[c.title]) {
+          const col = ci % cols, row = Math.floor(ci / cols);
+          c.x = PAD + col * (CW + GAP);
+          c.y = PAD + row * (HEAD_H + c.visRows * ROW_H + 10 + GAP);
+          ci++;
+        }
       }
+      if (pos[c.title]) { c.x = pos[c.title][0]; c.y = pos[c.title][1]; }
     }
-    if (pos[c.title]) { c.x = pos[c.title][0]; c.y = pos[c.title][1]; }
     clampCard(c);
+    // 滚动位置跨激活记忆
+    if (scrollPos[c.title]) list.scrollTop = scrollPos[c.title];
   }
 }
 
@@ -249,6 +355,8 @@ function bindDrag(card, el) {
   const head = el.querySelector('.head');
   head.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
+    // + 按钮不触发拖动
+    if (e.target.classList.contains('plus')) return;
     dragging = { card, ox: e.clientX - card.x, oy: e.clientY - card.y, sx: e.clientX, sy: e.clientY };
     head.setPointerCapture(e.pointerId);
     e.preventDefault();
@@ -273,7 +381,7 @@ function bindDrag(card, el) {
   head.addEventListener('pointercancel', endDrag);
 }
 window.addEventListener('resize', () => {
-  for (const c of cardModels) clampCard(c); 
+  for (const c of cardModels) clampCard(c);
 });
 // 全局兜底：指针事件在窗口/屏幕边缘可能丢失（pointerup 不到达），
 // dragging 残留会导致之后所有卡片拖不动（"卡死"）——任何位置结束都清理
@@ -286,7 +394,7 @@ function esc(s) {
 
 function buildCard(c) {
   const card = document.createElement('div');
-  card.className = 'card' + (c.skatch ? ' skatch' : '');
+  card.className = 'card' + (c.skatch ? ' skatch' : '') + (c.temp ? ' temp' : '');
   card.style.height = '0px'; // 占位，layoutCards 后确定
   const head = document.createElement('div');
   head.className = 'head';
@@ -295,6 +403,7 @@ function buildCard(c) {
   plus.className = 'plus';
   plus.textContent = '+';
   plus.title = '新建文件';
+  plus.onclick = (e) => { e.stopPropagation(); startNewNote(c.dir || c.title); };
   head.appendChild(plus);
   const list = document.createElement('div');
   list.className = 'rows';
@@ -303,10 +412,12 @@ function buildCard(c) {
     row.className = 'row ' + (r.kind === 'file' ? 'file' : r.kind === 'subdir' ? 'subdir' : '');
     row.innerHTML = (r.kind === 'file' ? '<span class="dot">·</span>' : '') + esc(r.label);
     row.onclick = () => {
-      if (r.kind === 'file') openEditor(r.path);
+      if (r.kind === 'file') openEditor(r.path, c.skatch ? r.idx : null);
+      else if (r.kind === 'subdir') openTempCard(c.dir + '/' + r.name, row);
     };
     list.appendChild(row);
   });
+  list.addEventListener('scroll', () => saveScrollPos(c));
   card.appendChild(head);
   card.appendChild(list);
   card.style.left = PAD + 'px';
@@ -315,6 +426,18 @@ function buildCard(c) {
   c.el = card;
   bindDrag(c, card);
   return c;
+}
+
+// 应用 skatch 编辑器导航条悬停指示（在 skatch 卡片对应段落行上画指示条）
+function applyNavHover() {
+  for (const c of cardModels) {
+    if (!c.skatch || !c.el) continue;
+    const rows = c.el.querySelectorAll('.row');
+    rows.forEach((row, i) => {
+      if (navHover !== null && i === navHover) row.classList.add('nav');
+      else row.classList.remove('nav');
+    });
+  }
 }
 
 async function renderCards() {
@@ -329,24 +452,26 @@ async function renderCards() {
   }
 
   cardModels = [];
-  // skatch 卡片（固定左）
+  // skatch 卡片（固定左，段落列表）
   if (skatch && skatch.segments) {
+    serverRoot = skatch.root || serverRoot;
     cardModels.push(buildCard({
-      title: 'skatch', skatch: true,
-      rows: skatch.segments.map(s => ({kind: 'file', label: s, path: skatch.path})),
+      title: 'skatch', skatch: true, dir: skatch.path.replace(/[^/]*$/, ''),
+      rows: skatch.segments.map((s, i) => ({kind: 'file', label: s, path: skatch.path, idx: i})),
     }));
   }
   // 目录卡片
   for (const d of dirs) {
     cardModels.push(buildCard({
-      title: d.name, skatch: false,
+      title: d.name, skatch: false, dir: d.path,
       rows: [
-        ...d.subdirs.map(s => ({kind: 'subdir', label: '▸ ' + s})),
+        ...d.subdirs.map(s => ({kind: 'subdir', label: '▸ ' + s, name: s})),
         ...d.notes.map(n => ({kind: 'file', label: n.title, path: n.path})),
       ],
     }));
   }
   layoutCards();
+  applyNavHover();
   setStatus(true, '已连接 · ' + serverAddr);
 }
 
@@ -355,28 +480,129 @@ function setStatus(ok, text) {
   document.getElementById('status-text').textContent = text;
 }
 
+// ---------- 临时子卡片 ----------
+async function openTempCard(dirPath, rowEl) {
+  // 同一目录已有临时卡 → 关闭（与编辑器 toggle 一致）
+  const exists = cardModels.find(c => c.temp && c.dir === dirPath);
+  if (exists) {
+    cardModels = cardModels.filter(c => c !== exists);
+    exists.el.remove();
+    return;
+  }
+  try {
+    const d = await anmIpc('overview_dir', {dir: dirPath});
+    const rect = rowEl.getBoundingClientRect();
+    // 新卡出现在鼠标右下方（不遮挡鼠标）
+    const x = Math.min(rect.left + 24, window.innerWidth - CW - 8);
+    const y = Math.min(rect.top + 24, window.innerHeight - 120);
+    const c = buildCard({
+      title: d.name, skatch: false, temp: true, dir: d.path,
+      x, y,
+      rows: [
+        ...(d.subdirs || []).map(s => ({kind: 'subdir', label: '▸ ' + s, name: s})),
+        ...(d.notes || []).map(n => ({kind: 'file', label: n.title, path: n.path})),
+      ],
+    });
+    cardModels.push(c);
+    layoutCards();
+  } catch (e) { showResult(String(e), true); }
+}
+
+// ---------- 新建笔记（标题行「+」） ----------
+let newNoteDir = null; // 新建模式：Some(目录)
+function startNewNote(dir) {
+  newNoteDir = dir || '';
+  const input = document.getElementById('cmd');
+  const prefix = (dir || '') + '/';
+  input.value = prefix;
+  showResult('输入文件名（回车创建，Esc 取消）→ ' + prefix, false);
+  input.focus();
+  const len = prefix.length;
+  input.setSelectionRange(len, len);
+}
+async function submitNewNote() {
+  const dir = newNoteDir;
+  newNoteDir = null;
+  if (!dir) return;
+  const input = document.getElementById('cmd');
+  const text = input.value.trim();
+  const prefix = dir + '/';
+  const name = text.startsWith(prefix) ? text.slice(prefix.length).trim() : text;
+  if (!name) { showResult('请输入文件名', true); return; }
+  try {
+    const data = await anmIpc('create_note', {dir, title: name});
+    input.value = '';
+    showResult('已创建 ' + (data && data.path ? data.path : dir + '/' + name));
+    renderCards();
+  } catch (e) { showResult(String(e), true); }
+}
+function cancelNewNote() {
+  newNoteDir = null;
+  document.getElementById('cmd').value = '';
+  showResult('', false);
+}
+
 // ---------- 编辑器 ----------
 const editorMask = document.getElementById('editor-mask');
 const eName = document.getElementById('e-name');
 const eBody = document.getElementById('e-body');
 const ePath = document.getElementById('e-path');
 let editingPath = null;
+let editingSkatchIdx = null; // skatch 段落模式：打开的段落下标
 
-async function openEditor(path) {
+// 路径显示：远程模式 <host>:<相对 root 路径>，本机模式全路径
+function displayPath(path) {
+  const host = (serverAddr || '').split(':')[0];
+  const remote = host && host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
+  if (remote && serverRoot && path.startsWith(serverRoot)) {
+    return host + ':' + path.slice(serverRoot.length);
+  }
+  return path;
+}
+
+async function openEditor(path, skatchIdx) {
+  // 再次点击正在编辑的同文件 → 关闭（与 ✕ 一致）；skatch 段落则重新定位
+  if (editingPath === path && skatchIdx === null) {
+    closeEditor(true);
+    return;
+  }
   try {
     const data = await anmIpc('read_note', {path});
     editingPath = path;
+    editingSkatchIdx = (skatchIdx !== undefined && skatchIdx !== null) ? skatchIdx : null;
     eName.value = path.split('/').pop();
     eBody.textContent = data.content;
-    ePath.textContent = path;
+    ePath.textContent = displayPath(path);
     editorMask.style.display = 'flex';
     eBody.focus();
+    if (editingSkatchIdx !== null) {
+      // skatch 段落定位：把光标放到该段开头并滚动可见
+      const lines = data.content.replace(/\r\n/g, '\n').split('\n');
+      let off = 0, idx = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].trim()) {
+          idx++;
+          if (idx === editingSkatchIdx) { off = lines.slice(0, i).join('\n').length; break; }
+        }
+      }
+      const sel = window.getSelection();
+      const range = document.createRange();
+      try {
+        range.setStart(eBody.firstChild || eBody, Math.min(off, (eBody.textContent || '').length));
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        eBody.scrollTop = off;
+      } catch (err) { /* 定位失败不影响编辑 */ }
+    } else {
+      eBody.scrollTop = 0;
+    }
   } catch (e) { showResult(String(e), true); }
 }
 
-async function saveEditor() {
+// 保存编辑器（含改名）；opts.quiet=true 用于 Esc 退出自动保存（不显示结果）
+async function saveEditor(quiet) {
   if (!editingPath) return;
-  // 改名（同目录）
   const oldName = editingPath.split('/').pop();
   const newName = eName.value.trim();
   let target = editingPath;
@@ -384,33 +610,104 @@ async function saveEditor() {
     const dir = editingPath.slice(0, editingPath.length - oldName.length);
     target = dir + newName;
     try { await anmIpc('rename_note', {from: editingPath, to: target}); }
-    catch (e) { showResult('重命名失败: ' + e, true); return; }
+    catch (e) {
+      if (quiet) showToast('重命名失败: ' + e);
+      else showResult('重命名失败: ' + e, true);
+      return;
+    }
     editingPath = target;
+    eName.value = newName;
   }
   try {
     await anmIpc('write_note', {path: target, content: eBody.textContent});
-    showResult('已保存 ' + target);
-    closeEditor();
+    if (!quiet) showResult('已保存 ' + target);
+    closeEditor(false);
     renderCards();
-  } catch (e) { showResult('保存失败: ' + e, true); }
+  } catch (e) { if (!quiet) showResult('保存失败: ' + e, true); }
 }
 
-function closeEditor() {
+// closeEditor(save)：save=true 表示先保存再关闭（Esc / 同文件 toggle）
+function closeEditor(save) {
+  if (save) { saveEditor(true); return; }
   editorMask.style.display = 'none';
   editingPath = null;
+  editingSkatchIdx = null;
+  navHover = null;
+  applyNavHover();
 }
 
-// ---------- 输入框 ----------
+function openEditorDir() {
+  if (!editingPath) return;
+  const dir = editingPath.slice(0, editingPath.lastIndexOf('/'));
+  anmApi.openPath(dir).then((r) => {
+    if (r && r.data && r.data.ok === false) showToast(r.data.msg || '无法打开所在位置');
+  });
+}
+
+// ---------- 输入框：anw 语义 + 斜杠命令 ----------
+const SLASH_HELP =
+  '斜杠命令（与 anm 命令一致）:\n' +
+  '/help            本帮助\n' +
+  '/inbox|/anw <文本>   写入 skatch.md\n' +
+  '/find <标签…>      按标签查找笔记\n' +
+  '/search <关键字>    按标题查找笔记\n' +
+  '/tags             列出全部标签\n' +
+  '/ls               列出全部一级目录\n' +
+  '/open <路径>       用系统默认方式打开';
+
 const cmdInput = document.getElementById('cmd');
+
+function fmtNotes(data) {
+  const arr = Array.isArray(data) ? data : [];
+  return arr.map(n => (n.title || '?') + (n.path ? '  ' + n.path : '')).join('\n') || '（无结果）';
+}
+
 async function submitCmd() {
   const text = cmdInput.value.trim();
   if (!text) return;
+  // 新建模式：回车 = 创建笔记
+  if (newNoteDir) { submitNewNote(); return; }
   cmdInput.value = '';
-  if (text.startsWith('/')) { showResult('命令暂未实现: ' + text, true); return; }
+  if (!text.startsWith('/')) {
+    try {
+      await anmIpc('inbox_append', {text});
+      showResult('已写入 skatch');
+      renderCards();
+    } catch (e) { showResult(String(e), true); }
+    return;
+  }
+  const rest = text.slice(1);
+  const sp = rest.search(/\s/);
+  const cmd = (sp < 0 ? rest : rest.slice(0, sp)).toLowerCase();
+  const arg = (sp < 0 ? '' : rest.slice(sp + 1)).trim();
   try {
-    await anmIpc('inbox_append', {text});
-    showResult('已写入 skatch');
-    renderCards();
+    switch (cmd) {
+      case 'help':
+        showResult(SLASH_HELP); break;
+      case 'inbox':
+      case 'anw':
+        if (!arg) { showResult('用法: /' + cmd + ' <文本>', true); break; }
+        await anmIpc('inbox_append', {text: arg});
+        showResult('已写入 skatch'); renderCards(); break;
+      case 'find':
+        if (!arg) { showResult('用法: /find <标签…>', true); break; }
+        showResult(fmtNotes(await anmIpc('find_tag', {tags: arg.split(/\s+/)}))); break;
+      case 'search':
+        if (!arg) { showResult('用法: /search <关键字>', true); break; }
+        showResult(fmtNotes(await anmIpc('search', {keyword: arg}))); break;
+      case 'tags':
+        showResult((await anmIpc('tags')).map(t => '@' + t).join(' ') || '（无标签）'); break;
+      case 'ls':
+        showResult((await anmIpc('overview')).map(d => d.name).join('  ') || '（无目录）'); break;
+      case 'open':
+        if (!arg) { showResult('用法: /open <路径>', true); break; }
+        const r = await anmApi.openPath(arg);
+        if (r && r.data && r.data.ok === false) showToast(r.data.msg || '无法打开：' + arg);
+        else { showResult('打开 ' + arg); }
+        break;
+      default:
+        showResult('未知命令 /' + cmd + '（输入 /help 查看）', true);
+    }
   } catch (e) { showResult(String(e), true); }
 }
 function showResult(text, isErr) {
@@ -424,33 +721,203 @@ anmApi.onEvent((event) => {
     renderCards();
   }
   if (event === 'hidden') {
-    // 窗口隐藏，无需动作
+    // 窗口隐藏（win32 版"取消激活"语义）：退出编辑器（自动保存/改名）→
+    // 清空临时状态（临时子卡片 / 新建模式 / 结果 / 设置对话框）
+    if (editingPath) closeEditor(true);
+    closeSettings();
+    cardModels = [];
+    cardsEl.innerHTML = '';
+    if (newNoteDir) cancelNewNote();
+    resultEl.textContent = '';
   }
 });
-
 
 function showOverlay() {
   document.getElementById('overlay').style.display = 'flex';
   renderCards();
 }
 
+// 点击空白取消激活（点击输入框 / 卡片 / 编辑器之外）
+document.getElementById('overlay').addEventListener('mousedown', (e) => {
+  if (e.target === document.getElementById('overlay') || e.target === cardsEl) {
+    anmApi.hide();
+  }
+  // 点击编辑器遮罩背景（非编辑器本身）→ 保存并退出
+  if (e.target === document.getElementById('editor-mask')) {
+    closeEditor(true);
+  }
+});
+// 卡片区不抢输入框焦点（win32 版 MA_NOACTIVATE 语义）
+cardsEl.addEventListener('mousedown', (e) => e.preventDefault());
 
+// ---------- 设置对话框（服务地址 / 快捷键） ----------
+const settingsMask = document.getElementById('settings-mask');
+let settingsMode = null;   // 'settings' | 'hotkey'
+let pendingHotkey = null;  // 待确认组合（规范化字符串）
 
-// 窗口常驻置顶（BrowserWindow alwaysOnTop），无需前端保护
+function normalizeHotkey(parts) {
+  // parts: 修饰符数组 + 主键；输出 Alt+Shift+Z 形式
+  const mods = [];
+  if (parts.alt) mods.push('Alt');
+  if (parts.ctrl) mods.push('Ctrl');
+  if (parts.shift) mods.push('Shift');
+  const key = parts.key;
+  if (!key) return null;
+  return mods.concat(key).join('+');
+}
+
+function openSettings(mode) {
+  settingsMode = mode;
+  document.getElementById('s-settings').classList.toggle('hidden', mode !== 'settings');
+  document.getElementById('s-hotkey').classList.toggle('hidden', mode !== 'hotkey');
+  document.getElementById('s-title').textContent =
+    mode === 'settings' ? '设置服务地址' : '设置快捷键';
+  pendingHotkey = null;
+  document.getElementById('hotkey-err').textContent = '';
+  document.getElementById('hotkey-hint').textContent = '（等待按键…）';
+  settingsMask.style.display = 'flex';
+  if (mode === 'settings') {
+    document.getElementById('s-addr').value = serverAddr;
+    document.getElementById('s-token').value = serverToken || '';
+    document.getElementById('s-addr').focus();
+  } else {
+    document.getElementById('hotkey-hint').focus();
+  }
+}
+function closeSettings() {
+  settingsMask.style.display = 'none';
+  settingsMode = null;
+}
+async function applySettings() {
+  if (settingsMode === 'settings') {
+    const addr = document.getElementById('s-addr').value.trim();
+    const token = document.getElementById('s-token').value.trim();
+    if (!addr) { showToast('服务地址不能为空'); return; }
+    serverAddr = addr;
+    serverToken = token || null;
+    localStorage.setItem('anm.serverAddr', serverAddr);
+    localStorage.setItem('anm.serverToken', serverToken || '');
+    await anmApi.setConfig({addr: serverAddr, token: serverToken});
+    showToast('服务地址已更新：' + serverAddr);
+    closeSettings();
+    renderCards();
+  } else if (settingsMode === 'hotkey') {
+    if (!pendingHotkey) { showToast('请先按下新组合键'); return; }
+    const r = await anmApi.setHotkey(pendingHotkey);
+    if (r.status === 'ok') {
+      showToast('快捷键已更新：' + pendingHotkey);
+      document.getElementById('hotkey-text').textContent = '热键 ' + pendingHotkey;
+      closeSettings();
+    } else {
+      document.getElementById('hotkey-err').textContent = String(r.data || '设置失败');
+    }
+  }
+}
+document.getElementById('s-ok').onclick = applySettings;
+document.getElementById('s-cancel').onclick = closeSettings;
+
+// 快捷键捕获：Alt/Ctrl/Shift + 字母/数字/功能键
+document.getElementById('hotkey-hint').addEventListener('keydown', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  const parts = {alt: e.altKey, ctrl: e.ctrlKey, shift: e.shiftKey};
+  const k = e.key;
+  const mods = parts.alt || parts.ctrl || parts.shift;
+  if (!mods) return; // 至少一个修饰键
+  if (/^[A-Za-z0-9]$/.test(k)) {
+    parts.key = k.toUpperCase();
+  } else if (/^F([1-9]|1[0-2])$/.test(k)) {
+    parts.key = k;
+  } else {
+    return; // 忽略纯修饰键
+  }
+  // 纯 Shift+字母 不构成组合（缺少 Alt/Ctrl）
+  if (!parts.alt && !parts.ctrl && parts.shift) return;
+  pendingHotkey = normalizeHotkey(parts);
+  document.getElementById('hotkey-hint').textContent = pendingHotkey;
+});
+document.getElementById('hotkey-hint').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.preventDefault(); closeSettings(); }
+});
+document.getElementById('hotkey-hint').addEventListener('keyup', (e) => {
+  // 只按修饰键时给出提示
+  if (['Alt', 'Control', 'Shift'].includes(e.key)) {
+    document.getElementById('hotkey-hint').textContent = '（等待按键…）';
+  }
+});
+
+// 托盘菜单事件 → 打开对应对话框
+anmApi.onMenu((mode) => {
+  showOverlay();
+  if (mode === 'settings') openSettings('settings');
+  else if (mode === 'hotkey') openSettings('hotkey');
+});
+
+// 快捷键
 cmdInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitCmd();
-  if (e.key === 'Escape') hideOverlay();
+  if (e.key === 'Escape') {
+    if (newNoteDir) { cancelNewNote(); return; }
+    hideOverlay();
+  }
 });
-document.getElementById('e-save').onclick = saveEditor;
-document.getElementById('e-close').onclick = closeEditor;
+document.getElementById('e-save').onclick = () => saveEditor(false);
+document.getElementById('e-close').onclick = () => closeEditor(false);
+document.getElementById('e-open-dir').onclick = openEditorDir;
+// 编辑器：Ctrl+S 保存 / Esc 退出自动保存
+eBody.addEventListener('keydown', (e) => {
+  if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEditor(false); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeEditor(true); }
+});
+eName.addEventListener('keydown', (e) => {
+  if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEditor(false); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeEditor(true); }
+});
+// skatch 编辑器内鼠标悬停 → 联动覆盖层 skatch 卡片对应段落指示条
+// （caretRangeFromPoint：鼠标位置 → 字符位置 → 所在行号）
+eBody.addEventListener('mousemove', (e) => {
+  if (editingSkatchIdx === null) return;
+  const range = document.caretRangeFromPoint(e.clientX, e.clientY);
+  if (!range) return;
+  let cp = range.startOffset;
+  // contenteditable 纯文本：startContainer 是文本节点；offset 需折算到全文
+  let node = range.startContainer;
+  while (node && node !== eBody) {
+    if (node.previousSibling) {
+      let sib = node.previousSibling;
+      cp += sib.textContent ? sib.textContent.length : 0;
+    }
+    node = node.parentNode;
+  }
+  const text = eBody.textContent || '';
+  let line = 0;
+  for (let i = 0; i < Math.min(cp, text.length); i++) {
+    if (text[i] === '\n') line++;
+  }
+  if (navHover !== line) { navHover = line; applyNavHover(); }
+});
+eBody.addEventListener('mouseleave', () => {
+  if (navHover !== null) { navHover = null; applyNavHover(); }
+});
 
-// ---------- 托盘 ----------
-
+function hideOverlay() {
+  anmApi.hide();
+}
 
 // ---------- 启动 ----------
-window.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('hotkey-text').textContent = '热键 Alt+Shift+Z';
-  anmApi.setConfig({ addr: serverAddr, token: serverToken });
+window.addEventListener('DOMContentLoaded', async () => {
+  // 服务地址：localStorage 优先（旧版已存 192.168.0.102:17370），首次运行
+  // 无本地配置时用内置默认跨机地址（与旧版一致）。不要用 Rust 侧 getConfig
+  // 的 addr 覆盖——Rust 默认 127.0.0.1 仅用于本机模式，前端默认才是跨机地址。
+  try {
+    const r = await anmApi.getConfig();
+    if (r.status === 'ok') {
+      document.getElementById('hotkey-text').textContent =
+        '热键 ' + (r.data.hotkey || 'Alt+Shift+Z');
+    }
+  } catch (e) {}
+  // 先把地址同步给 Rust（await 保证 renderCards 的 TCP 用对地址）
+  await anmApi.setConfig({ addr: serverAddr, token: serverToken });
   showOverlay();
   setStatus(true, '已连接 · ' + serverAddr);
   // 时钟心跳：诊断 JS 主线程是否卡死
