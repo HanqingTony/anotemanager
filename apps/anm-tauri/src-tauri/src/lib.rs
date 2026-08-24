@@ -391,11 +391,19 @@ pub fn run() {
                             show_main(&win);
                         }
                     }
-                    // 设置对话框由前端渲染（与覆盖层风格统一）
+                    // 设置对话框由前端渲染（与覆盖层风格统一）；
+                    // 托盘场景下窗口通常是隐藏的——必须先显示窗口，
+                    // 否则对话框 DOM 显示在看不见的窗口里（"点了没反应"）
                     "settings" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            show_main(&win);
+                        }
                         let _ = app.emit("anm-menu", "settings");
                     }
                     "hotkey" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            show_main(&win);
+                        }
                         let _ = app.emit("anm-menu", "hotkey");
                     }
                     "quit" => app.exit(0),
