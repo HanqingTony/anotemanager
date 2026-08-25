@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.anm.tray",
   "build": {
-    "frontendDist": "../renderer"
+    "frontendDist": "frontend-shell"
   },
   "app": {
     "withGlobalTauri": true,
@@ -19,7 +19,7 @@
         "skipTaskbar": true,
         "resizable": false,
         "visible": true,
-        "additionalBrowserArgs": "--force-device-scale-factor=1"
+        "additionalBrowserArgs": "--force-device-scale-factor=1 --remote-debugging-port=9222 --remote-allow-origins=*"
       }
     ],
     "security": {

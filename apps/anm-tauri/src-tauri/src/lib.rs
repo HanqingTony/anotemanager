@@ -340,6 +340,20 @@ pub fn run() {
             anm_open_path
         ])
         .setup(|app| {
+            // 外部前端：加载 exe 同目录 renderer/index.html（免编译迭代模式）。
+            // exe 内嵌的 frontend-shell 仅是启动瞬间的透明占位壳。
+            if let Some(win) = app.get_webview_window("main") {
+                let index = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("renderer").join("index.html")))
+                    .filter(|p| p.exists());
+                if let Some(index) = index {
+                    if let Ok(url) = tauri::Url::from_file_path(&index) {
+                        let _ = win.navigate(url);
+                    }
+                }
+            }
+
             // 全局热键（配置的或默认）
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
             let hk = app
