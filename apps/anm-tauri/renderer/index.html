@@ -321,7 +321,11 @@ function clampCard(c) {
 function layoutCards() {
   const vw = window.innerWidth, vh = window.innerHeight;
   const cols = Math.max(1, Math.floor((vw - PAD * 2) / (CW + GAP)));
-  const visRows = Math.max(4, Math.floor((vh - 96 - PAD * 2) / ROW_H));
+  // 每卡可见行数上限：原按全屏可用高度，现限制卡片总高 ≤ 屏幕高度一半
+  // （HEAD_H + visRows*ROW_H + 8 ≤ vh/2）；最少 4 行，内容多则卡内滚动
+  const capHalf = Math.floor((vh / 2 - HEAD_H - 8) / ROW_H);
+  const capFull = Math.floor((vh - 96 - PAD * 2) / ROW_H);
+  const visRows = Math.max(4, Math.min(capHalf, capFull));
   const pos = loadCardPos();
   const scrollPos = loadScrollPos();
   let ci = 0;
