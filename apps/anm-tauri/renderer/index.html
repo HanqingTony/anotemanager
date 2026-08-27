@@ -96,6 +96,13 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 2px rgba(95, 190, 255, 0.45);
   }
+  .drag-ghost {
+    position: fixed; z-index: 500; pointer-events: none;
+    background: var(--card); border: 1px solid var(--accent); border-radius: 6px;
+    color: var(--text); font-size: 13px; padding: 4px 10px;
+    max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  }
   #editor-mask {
     display: none; position: fixed; inset: 0;
     z-index: 200;
@@ -444,16 +451,18 @@ function buildCard(c) {
       if (r.kind === 'file') openEditor(r.path, c.skatch ? r.idx : null);
       else if (r.kind === 'subdir') openTempCard(c.dir + '/' + r.name, row);
     };
-    // 拖放源：普通文件行 → 移动到目标目录；skatch 段落行 → 抽取为独立文件
+    // 拖放源（自实现 pointer 拖拽，不依赖 HTML5 DnD——真机行为更可控）：
+    // 普通文件行 → 移动到目标目录；skatch 段落行 → 抽取为独立文件
     if (r.kind === 'file') {
-      row.draggable = true;
-      row.addEventListener('dragstart', (e) => {
-        if (c.skatch) {
-          e.dataTransfer.setData('application/x-anm-seg', String(r.idx));
-        } else {
-          e.dataTransfer.setData('application/x-anm-move', r.path);
-        }
-        e.dataTransfer.effectAllowed = 'move';
+      row.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        dragSrc = {
+          kind: c.skatch ? 'seg' : 'move',
+          path: r.path, idx: r.idx,
+          el: row,
+          startX: e.clientX, startY: e.clientY,
+          active: false,
+        };
       });
     }
     list.appendChild(row);
@@ -470,7 +479,81 @@ function buildCard(c) {
   return c;
 }
 
-// 拖放目标：卡片接收「移动文件」与「skatch 段落抽取」两种投放
+// ---------- 自实现拖放（行 → 卡片） ----------
+let dragSrc = null;     // {kind:'move'|'seg', path, idx, el, startX, startY, active}
+let dragGhost = null;   // 跟随光标的拖影元素
+let dropCard = null;    // 当前高亮的目标卡元素
+
+// 统一的 drop 执行（自实现拖拽与编辑器 HTML5 拖拽共用）
+async function handleDrop(card, kind, payload) {
+  if (!card || !card.dir) return;
+  try {
+    if (kind === 'move') {
+      const from = payload;
+      if (from && from.startsWith(card.dir + '/')) {
+        showResult('已在同一目录：' + card.dir, true);
+        return;
+      }
+      await anmIpc('move_note', {from, to_dir: card.dir});
+      showResult('已移动 → ' + card.dir);
+      renderCards();
+    } else if (kind === 'seg') {
+      const idx = parseInt(payload, 10);
+      if (isNaN(idx) || idx < 0) return;
+      const data = await anmIpc('skatch_extract', {dir: card.dir, index: idx});
+      showResult('已抽取为文件 ' + (data && data.path ? data.path : card.dir));
+      if (editingPath) closeEditor(false); // 抽取改了 skatch 内容，编辑器关闭重取
+      renderCards();
+    }
+  } catch (err) { showResult(String(err), true); }
+}
+
+document.addEventListener('pointermove', (e) => {
+  if (!dragSrc) return;
+  if (!dragSrc.active) {
+    // 超过阈值才进入拖拽（否则视为点击，交给 click 打开编辑器）
+    if (Math.hypot(e.clientX - dragSrc.startX, e.clientY - dragSrc.startY) < 6) return;
+    dragSrc.active = true;
+    const ghost = document.createElement('div');
+    ghost.className = 'drag-ghost';
+    ghost.textContent = dragSrc.el.textContent;
+    document.body.appendChild(ghost);
+    dragGhost = ghost;
+    document.body.style.cursor = 'grabbing';
+  }
+  if (dragGhost) {
+    dragGhost.style.left = (e.clientX + 14) + 'px';
+    dragGhost.style.top = (e.clientY + 12) + 'px';
+  }
+  // 鼠标下的目标卡（从坐标反查，卡片可被 z-index 覆盖也能命中）
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const cardEl = under ? under.closest('.card') : null;
+  if (dropCard !== cardEl) {
+    if (dropCard) dropCard.classList.remove('drop-target');
+    dropCard = cardEl;
+    if (dropCard) dropCard.classList.add('drop-target');
+  }
+});
+
+document.addEventListener('pointerup', async (e) => {
+  if (!dragSrc) return;
+  const src = dragSrc;
+  dragSrc = null;
+  if (dragGhost) { dragGhost.remove(); dragGhost = null; }
+  if (dropCard) { dropCard.classList.remove('drop-target'); dropCard = null; }
+  document.body.style.cursor = '';
+  if (!src.active) return; // 未拖拽（点击），click 照常打开编辑器
+  // 命中目标卡
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const cardEl = under ? under.closest('.card') : null;
+  if (!cardEl) return;
+  const card = cardModels.find((m) => m.el === cardEl);
+  if (!card) return;
+  await handleDrop(card, src.kind, src.kind === 'seg' ? String(src.idx) : src.path);
+});
+
+// 拖放目标（HTML5）：接收内置编辑器拖出的 skatch 段落（编辑器在 mask 层，
+// 不走自实现拖拽）。文件行/段落行的拖放已改为自实现 pointer 拖拽（见上）。
 function bindDrop(c) {
   const el = c.el;
   el.addEventListener('dragover', (e) => {
@@ -485,27 +568,8 @@ function bindDrop(c) {
     e.preventDefault();
     el.classList.remove('drop-target');
     const t = e.dataTransfer;
-    if (!c.dir) return;
-    if (t.types.indexOf('application/x-anm-move') >= 0) {
-      const from = t.getData('application/x-anm-move');
-      if (from && from.startsWith(c.dir + '/')) {
-        showResult('已在同一目录：' + c.dir, true);
-        return;
-      }
-      try {
-        await anmIpc('move_note', {from, to_dir: c.dir});
-        showResult('已移动 → ' + c.dir);
-        renderCards();
-      } catch (err) { showResult(String(err), true); }
-    } else if (t.types.indexOf('application/x-anm-seg') >= 0) {
-      const idx = parseInt(t.getData('application/x-anm-seg'), 10);
-      if (isNaN(idx) || idx < 0) return;
-      try {
-        const data = await anmIpc('skatch_extract', {dir: c.dir, index: idx});
-        showResult('已抽取为文件 ' + (data && data.path ? data.path : c.dir));
-        if (editingPath) closeEditor(false); // 抽取改了 skatch 内容，编辑器关闭重取
-        renderCards();
-      } catch (err) { showResult(String(err), true); }
+    if (t.types.indexOf('application/x-anm-seg') >= 0) {
+      await handleDrop(c, 'seg', t.getData('application/x-anm-seg'));
     }
   });
 }
