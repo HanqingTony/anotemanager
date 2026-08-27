@@ -47,6 +47,8 @@ pub enum Request {
     Skatch,
     /// 跨目录移动笔记文件（托盘文件行拖动用；**人机通道**，MCP 不暴露）
     MoveNote { from: String, to_dir: String },
+    /// 跨目录移动整个目录树（托盘子目录行拖动用；**人机通道**，MCP 不暴露）
+    MoveDir { from: String, to_dir: String },
     /// 从 skatch 抽取段落为独立文件（托盘把段落拖到目录卡片时用；
     /// **人机通道**，MCP 不暴露）
     SkatchExtract { dir: String, index: usize },

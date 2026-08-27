@@ -252,6 +252,26 @@ fn exec(cfg: &Config, req: Request) -> anyhow::Result<serde_json::Value> {
             std::fs::rename(&from_r, &to_r)?;
             Ok(serde_json::json!({ "from": from_r, "to": to_r, "root": cfg.root, "moved": true }))
         }
+        Request::MoveDir { from, to_dir } => {
+            let from_r = path::resolve_dir_in_root(&cfg.root, &from)?;
+            let to_dir_r = path::resolve_dir_in_root(&cfg.root, &to_dir)?;
+            // 防嵌套：不能把目录移进它自身或自己的子树
+            if to_dir_r.starts_with(&from_r) {
+                bail!("不能把目录移进它自身: {from}");
+            }
+            if from_r.parent() == Some(to_dir_r.as_path()) {
+                bail!("目录已在目标目录中: {from}");
+            }
+            let name = from_r
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("源目录无名称: {from}"))?;
+            let to_r = to_dir_r.join(name);
+            if to_r.exists() {
+                bail!("目标已存在，不覆盖: {}", to_r.display());
+            }
+            std::fs::rename(&from_r, &to_r)?;
+            Ok(serde_json::json!({ "from": from_r, "to": to_r, "root": cfg.root, "moved": true }))
+        }
     }
 }
 

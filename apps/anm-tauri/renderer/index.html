@@ -335,13 +335,21 @@ function clampCard(c) {
 function layoutCards() {
   const vw = window.innerWidth, vh = window.innerHeight;
   const cols = Math.max(1, Math.floor((vw - PAD * 2) / (CW + GAP)));
-  // 每卡可见行数上限：原按全屏可用高度，现限制卡片总高 ≤ 屏幕高度一半
-  // （HEAD_H + visRows*ROW_H + 8 ≤ vh/2）；最少 4 行，内容多则卡内滚动
-  const capHalf = Math.floor((vh / 2 - HEAD_H - 8) / ROW_H);
-  const capFull = Math.floor((vh - 96 - PAD * 2) / ROW_H);
-  const visRows = Math.max(4, Math.min(capHalf, capFull));
   const pos = loadCardPos();
   const scrollPos = loadScrollPos();
+  // 默认网格：skatch 卡占 (0,0)，目录卡从 skatch 右侧起排（skatch 宽 268，
+  // 比一列 254 宽，不能复用第一列）；每行等高。
+  const gridCols = Math.max(1, Math.floor((vw - SKW - GAP) / (CW + GAP)));
+  const nGrid = cardModels.filter((c) => !c.skatch && !c.temp && !pos[c.title]).length;
+  const needRows = Math.max(1, Math.ceil(nGrid / gridCols));
+  // 每卡可见行数上限：①≤屏幕一半 ②全部行放得下（行数 × 行高 ≤ vh，
+  // 行高按可见行数计算——若卡高超过行高会跨行重叠，故压缩可见行数）；
+  // 最少 4 行，内容多则卡内滚动。
+  const capHalf = Math.floor((vh / 2 - HEAD_H - 8) / ROW_H);
+  const capFull = Math.floor((vh - 96 - PAD * 2) / ROW_H);
+  const capFit = Math.floor((vh / needRows - HEAD_H - 18) / ROW_H);
+  const visRows = Math.max(4, Math.min(capHalf, capFull, capFit));
+  const gridRowH = HEAD_H + visRows * ROW_H + 10 + GAP;
   let ci = 0;
   for (const c of cardModels) {
     // 每卡可见行数（内容多则卡内滚动；全部卡片完整在画布内）
@@ -355,9 +363,10 @@ function layoutCards() {
         if (!pos[c.title]) { c.x = PAD; c.y = PAD; }
       } else {
         if (!pos[c.title]) {
-          const col = ci % cols, row = Math.floor(ci / cols);
-          c.x = PAD + col * (CW + GAP);
-          c.y = PAD + row * (HEAD_H + c.visRows * ROW_H + 10 + GAP);
+          const col = ci % gridCols;
+          const row = Math.floor(ci / gridCols);
+          c.x = PAD + (SKW + GAP) + col * (CW + GAP);
+          c.y = PAD + row * gridRowH;
           ci++;
         }
       }
@@ -452,13 +461,15 @@ function buildCard(c) {
       else if (r.kind === 'subdir') openTempCard(c.dir + '/' + r.name, row);
     };
     // 拖放源（自实现 pointer 拖拽，不依赖 HTML5 DnD——真机行为更可控）：
-    // 普通文件行 → 移动到目标目录；skatch 段落行 → 抽取为独立文件
-    if (r.kind === 'file') {
+    // 普通文件行 → 移动到目标目录；skatch 段落行 → 抽取为独立文件；
+    // 子目录行 → 移动整个目录树（move_dir）
+    if (r.kind === 'file' || r.kind === 'subdir') {
       row.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
         dragSrc = {
-          kind: c.skatch ? 'seg' : 'move',
-          path: r.path, idx: r.idx,
+          kind: r.kind === 'subdir' ? 'dir' : (c.skatch ? 'seg' : 'move'),
+          path: r.kind === 'subdir' ? c.dir + '/' + r.name : r.path,
+          idx: r.idx,
           el: row,
           startX: e.clientX, startY: e.clientY,
           active: false,
@@ -503,6 +514,15 @@ async function handleDrop(card, kind, payload) {
       const data = await anmIpc('skatch_extract', {dir: card.dir, index: idx});
       showResult('已抽取为文件 ' + (data && data.path ? data.path : card.dir));
       if (editingPath) closeEditor(false); // 抽取改了 skatch 内容，编辑器关闭重取
+      renderCards();
+    } else if (kind === 'dir') {
+      const from = payload;
+      if (from && from.slice(0, from.lastIndexOf('/')) === card.dir) {
+        showResult('已在同一目录：' + card.dir, true);
+        return;
+      }
+      await anmIpc('move_dir', {from, to_dir: card.dir});
+      showResult('已移动目录 → ' + card.dir);
       renderCards();
     }
   } catch (err) { showResult(String(err), true); }
