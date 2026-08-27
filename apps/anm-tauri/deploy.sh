@@ -20,6 +20,7 @@ fi
 
 scp -q "$EXE" "$HOST:/tmp/anm-tauri.exe" || { echo scp exe 失败; exit 1; }
 scp -q "$LOADER" "$HOST:/tmp/WebView2Loader.dll" || { echo scp loader 失败; exit 1; }
+timeout 30 ssh "$HOST" "rm -rf /tmp/anm-renderer" 2>/dev/null
 scp -qr "$RENDERER" "$HOST:/tmp/anm-renderer" || { echo scp renderer 失败; exit 1; }
 
 timeout 60 ssh "$HOST" "
