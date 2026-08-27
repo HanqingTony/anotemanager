@@ -475,7 +475,7 @@ function bindDrop(c) {
   const el = c.el;
   el.addEventListener('dragover', (e) => {
     const types = e.dataTransfer.types;
-    if (!types.includes('application/x-anm-move') && !types.includes('application/x-anm-seg')) return;
+    if (types.indexOf('application/x-anm-move') < 0 && types.indexOf('application/x-anm-seg') < 0) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     el.classList.add('drop-target');
@@ -486,7 +486,7 @@ function bindDrop(c) {
     el.classList.remove('drop-target');
     const t = e.dataTransfer;
     if (!c.dir) return;
-    if (t.types.includes('application/x-anm-move')) {
+    if (t.types.indexOf('application/x-anm-move') >= 0) {
       const from = t.getData('application/x-anm-move');
       if (from && from.startsWith(c.dir + '/')) {
         showResult('已在同一目录：' + c.dir, true);
@@ -497,7 +497,7 @@ function bindDrop(c) {
         showResult('已移动 → ' + c.dir);
         renderCards();
       } catch (err) { showResult(String(err), true); }
-    } else if (t.types.includes('application/x-anm-seg')) {
+    } else if (t.types.indexOf('application/x-anm-seg') >= 0) {
       const idx = parseInt(t.getData('application/x-anm-seg'), 10);
       if (isNaN(idx) || idx < 0) return;
       try {
@@ -840,8 +840,13 @@ document.getElementById('overlay').addEventListener('mousedown', (e) => {
     closeEditor(true);
   }
 });
-// 卡片区不抢输入框焦点（win32 版 MA_NOACTIVATE 语义）
-cardsEl.addEventListener('mousedown', (e) => e.preventDefault());
+// 卡片区不抢输入框焦点（win32 版 MA_NOACTIVATE 语义）。
+// 注意：draggable 行（文件/段落拖放）的 mousedown 不能 preventDefault，
+// 否则会连 HTML5 拖拽的启动一起禁掉（"文件拖动无效"的根因）。
+cardsEl.addEventListener('mousedown', (e) => {
+  if (e.target.closest('[draggable="true"]')) return;
+  e.preventDefault();
+});
 
 // ---------- 设置对话框（服务地址 / 快捷键） ----------
 const settingsMask = document.getElementById('settings-mask');
