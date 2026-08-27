@@ -330,6 +330,52 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(single_instance)
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // 自定义协议 anm：把 exe 同目录 renderer/ 以 http://anm.localhost 提供。
+        // 外部目录模式的关键：file:// 页面 Origin 是 null，tauri IPC 会拒绝
+        // （"Origin header is not a valid URL"）；http://anm.localhost 是标准
+        // http origin，IPC 正常，且改 renderer/ 文件 = 改前端（零编译）。
+        .register_uri_scheme_protocol("anm", |ctx, request| {
+            use tauri::http::{header, Response, StatusCode};
+            // 外部 renderer 目录（与 exe 同目录）
+            let renderer = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("renderer")));
+            let path = request.uri().path().trim_start_matches('/');
+            let respond = |status: StatusCode, body: Vec<u8>, mime: &str| {
+                Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, mime)
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .body::<std::borrow::Cow<'static, [u8]>>(body.into())
+                    .unwrap()
+            };
+            match renderer {
+                Some(dir) if !path.is_empty() && !path.contains("..") => {
+                    let file = dir.join(path);
+                    match std::fs::read(&file) {
+                        Ok(bytes) => {
+                            let mime = match file
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("")
+                                .to_ascii_lowercase()
+                                .as_str()
+                            {
+                                "html" => "text/html; charset=utf-8",
+                                "js" => "text/javascript; charset=utf-8",
+                                "css" => "text/css; charset=utf-8",
+                                "png" => "image/png",
+                                "ico" => "image/x-icon",
+                                _ => "application/octet-stream",
+                            };
+                            respond(StatusCode::OK, bytes, mime)
+                        }
+                        Err(_) => respond(StatusCode::NOT_FOUND, Vec::new(), "text/plain"),
+                    }
+                }
+                _ => respond(StatusCode::NOT_FOUND, Vec::new(), "text/plain"),
+            }
+        })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             anm_ipc,
@@ -340,15 +386,16 @@ pub fn run() {
             anm_open_path
         ])
         .setup(|app| {
-            // 外部前端：加载 exe 同目录 renderer/index.html（免编译迭代模式）。
+            // 外部前端：navigate 到 http://anm.localhost/index.html（免编译迭代模式）。
             // exe 内嵌的 frontend-shell 仅是启动瞬间的透明占位壳。
             if let Some(win) = app.get_webview_window("main") {
-                let index = std::env::current_exe()
+                let exists = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.join("renderer").join("index.html")))
-                    .filter(|p| p.exists());
-                if let Some(index) = index {
-                    if let Ok(url) = tauri::Url::from_file_path(&index) {
+                    .map(|p| p.exists())
+                    .unwrap_or(false);
+                if exists {
+                    if let Ok(url) = "http://anm.localhost/index.html".parse::<tauri::Url>() {
                         let _ = win.navigate(url);
                     }
                 }
