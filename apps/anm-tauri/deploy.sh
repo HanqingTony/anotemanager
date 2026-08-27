@@ -31,6 +31,9 @@ timeout 60 ssh "$HOST" "
   cp /tmp/WebView2Loader.dll $DEST/WebView2Loader.dll
   rm -rf $DEST/renderer
   cp -r /tmp/anm-renderer $DEST/renderer
+  # 同步桌面副本（用户从桌面启动）
+  rm -rf '/mnt/c/Users/hanqi/Desktop/anm-tauri-desktop/renderer'
+  cp -r /tmp/anm-renderer '/mnt/c/Users/hanqi/Desktop/anm-tauri-desktop/renderer'
   cd $DEST
   setsid nohup ./anm-tauri.exe > /tmp/anm-tauri-run.log 2>&1 < /dev/null & disown
   sleep 10

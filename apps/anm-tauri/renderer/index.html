@@ -533,6 +533,7 @@ function applyNavHover() {
 }
 
 async function renderCards() {
+  try {
   cardsEl.innerHTML = '';
   const e1 = {ok: true}, e2 = {ok: true};
   const [dirs, skatch] = await Promise.all([
@@ -566,6 +567,9 @@ async function renderCards() {
   }
   layoutCards();
   applyNavHover();
+  } catch (err) {
+    showResult('渲染失败: ' + (err && err.message ? err.message : err), true);
+  }
 }
 
 function setStatus(ok, text) {
@@ -1053,6 +1057,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (t) t.textContent = t.textContent.split(' · ')[0] + ' · ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
   }, 1000);
 });
+
+// 启动兜底：启动时序问题（setConfig/renderCards 在启动初期偶发挂起）会导致
+// 覆盖层空白无卡片——1.5 秒间隔检查，无卡片则重试同步地址并重新渲染，最多 5 次。
+(function bootWatch() {
+  let tries = 0;
+  const t = setInterval(async () => {
+    tries++;
+    if (cardModels.length > 0 || tries > 5) { clearInterval(t); return; }
+    try { await anmApi.setConfig({ addr: serverAddr, token: serverToken }); } catch (e) {}
+    renderCards().catch((e) => showResult('渲染重试失败: ' + e, true));
+  }, 1500);
+})();
 </script>
 </body>
 </html>
