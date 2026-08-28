@@ -30,6 +30,7 @@ timeout 60 ssh "$HOST" "
   cp /tmp/anm-tauri.exe $DEST/anm-tauri.exe
   cp /tmp/WebView2Loader.dll $DEST/WebView2Loader.dll
   # exe/dll 同步桌面副本（此前只同步 renderer，桌面 exe 停留在旧版）
+  mkdir -p '/mnt/c/Users/tony/Desktop/anm-tauri-desktop'
   cp /tmp/anm-tauri.exe '/mnt/c/Users/tony/Desktop/anm-tauri-desktop/anm-tauri.exe'
   cp /tmp/WebView2Loader.dll '/mnt/c/Users/tony/Desktop/anm-tauri-desktop/WebView2Loader.dll'
   rm -rf $DEST/renderer
