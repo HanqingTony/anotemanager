@@ -155,6 +155,18 @@
     min-height: 12px;
   }
   #result.err { color: #ff7878; }
+  /* 左下角设置按钮 */
+  #settings-btn {
+    position: fixed; left: 18px; bottom: 24px;
+    z-index: 100;
+    padding: 7px 16px;
+    background: var(--input-bg);
+    border: 1px solid var(--card-border); border-radius: 10px;
+    color: var(--text-dim); font-size: 13px;
+    cursor: pointer; font-family: inherit;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  }
+  #settings-btn:hover { border-color: var(--accent); color: var(--accent); }
   .hidden { display: none !important; }
   /* toast：右上角小窗自动隐藏 */
   #toast {
@@ -206,6 +218,7 @@
     <span id="hotkey-text"></span>
   </div>
   <div id="cards"></div>
+  <button id="settings-btn" title="设置（服务地址 / 快捷键 / fact.md）">⚙ 设置</button>
   <div id="inputbar">
     <input id="cmd" placeholder="回车写入 skatch…（/help 查看命令）" autocomplete="off">
     <div id="result"></div>
@@ -240,6 +253,7 @@
         <div id="hotkey-err"></div>
       </div>
       <div class="s-row">
+        <button class="btn" id="s-fact">编辑 fact.md</button>
         <button class="btn" id="s-cancel">取消</button>
         <button class="btn" id="s-ok">确定</button>
       </div>
@@ -1001,6 +1015,14 @@ async function applySettings() {
 }
 document.getElementById('s-ok').onclick = applySettings;
 document.getElementById('s-cancel').onclick = closeSettings;
+// 左下角设置按钮：打开设置对话框
+document.getElementById('settings-btn').onclick = () => { showOverlay(); openSettings('settings'); };
+// 编辑 fact.md：关闭设置框，用内置编辑器打开（经 IPC 读写，跨机可用）
+document.getElementById('s-fact').onclick = () => {
+  closeSettings();
+  if (!serverRoot) { showToast('无法定位笔记库根目录（skatch 未加载）'); return; }
+  openEditor(serverRoot + '/.agentspace/fact.md', null);
+};
 
 // 快捷键捕获：Alt/Ctrl/Shift + 字母/数字/功能键
 document.getElementById('hotkey-hint').addEventListener('keydown', (e) => {

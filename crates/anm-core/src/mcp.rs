@@ -325,11 +325,38 @@ impl AnmServer {
     }
 }
 
-#[tool_handler(
-    name = "anm-core",
-    instructions = "anm 笔记系统记忆总线（anm-core 内置）：按标签/目录/内容检索笔记，写入 inbox，新增标签、整理标签行位置。所有 path/dir 参数仅在笔记库根目录内有效；对已有内容的修改/删除仅在作者显式指令下进行。开始工作时先读取资源 anm://facts（通用事实：家庭设备连接方式、VPS 凭据、当前项目等，人工维护、默认只读，永远以当前内容为准）。"
-)]
+// 基础指引 + fact.md 全文：agent 加载本 MCP 即自动知道全部通用事实
+// （不依赖 agent 主动读取 resource——"自动知道"的落地方式）。
+// fact.md 现场读取，永远以当前内容为准。
+fn build_instructions(cfg: &Config) -> String {
+    let base = "anm 笔记系统记忆总线（anm-core 内置）：按标签/目录/内容检索笔记，写入 inbox，新增标签、整理标签行位置。所有 path/dir 参数仅在笔记库根目录内有效；对已有内容的修改/删除仅在作者显式指令下进行。";
+    let facts_path = cfg.root.join(".agentspace").join("fact.md");
+    match std::fs::read_to_string(&facts_path) {
+        Ok(content) => format!(
+            "{base}\n\n===== 通用事实（fact.md 全文，人工维护、默认只读、以当前内容为准）=====\n{content}"
+        ),
+        Err(_) => base.to_string(),
+    }
+}
+
+#[tool_handler(name = "anm-core")]
 impl ServerHandler for AnmServer {
+    /// 手动实现 get_info（宏检测到已有则不自动生成）：instructions 动态
+    /// 携带 fact.md 全文——MCP 客户端在握手/初始化时即获得，agent 无需
+    /// 主动读取 resource 就能"自动知道"全部通用事实。
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
+        let instructions = self
+            .cfg()
+            .map(|cfg| build_instructions(&cfg))
+            .unwrap_or_default();
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "anm-core",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(instructions)
+    }
     /// 列出本服务器提供的全部资源（当前只有一个：通用事实）。
     ///
     /// 资源是 MCP 协议里"常驻上下文"的标准通道（readme §13）：客户端在
