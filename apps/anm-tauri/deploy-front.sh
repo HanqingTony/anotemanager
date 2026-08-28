@@ -4,7 +4,7 @@
 set -u
 HOST=tony@192.168.0.101
 RENDERER=apps/anm-tauri/renderer
-DEST=/mnt/c/Users/hanqi/anm-tauri
+DEST=/mnt/c/Users/tony/anm-tauri
 
 timeout 30 ssh "$HOST" "rm -rf /tmp/anm-renderer" 2>/dev/null
 scp -qr "$RENDERER" "$HOST:/tmp/anm-renderer" || { echo scp renderer 失败; exit 1; }
