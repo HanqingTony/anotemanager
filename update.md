@@ -1,5 +1,36 @@
 # anm 开发日志
 
+> 记录架构讨论、开发进度与变更。最新条目在顶部。
+
+## 2026-08-28 — v2.6（Tauri 主线建立）：迁移收官 + 拖放体系 + 外部目录模式
+
+> **里程碑**：Windows 薄壳从 win32 自绘 → Electron → Neutralino 实验 → **Tauri v2**，
+> 最终确定 Tauri 为唯一主线（原生全屏覆盖任务栏 + `--force-device-scale-factor=1`
+> 根治 DPI 穿透）。旧实现（win32 v2.5 已归档、Electron/Neutralino 分支已删）仅存历史。
+
+### 架构
+
+- **apps/anm-tauri**：Rust 后端（窗口/托盘/热键/IPC 转发/配置持久化）+ 纯 HTML 单文件前端
+  （renderer/index.html，零构建）；前端经自定义协议 `http://anm.localhost` 外部加载
+  （免编译迭代：改前端 → deploy-front.sh 推送即生效）；
+- **拖放体系（自实现 pointer 拖拽）**：文件行 → 目录卡 = MoveNote；skatch 段落行 /
+  编辑器内段落 → 目录卡 = SkatchExtract；**子目录行 → 目录卡 = MoveDir（新原语，
+  目录树移动，防自嵌套）**；拖影 + 目标高亮；
+- **卡片布局**：点击标题栏置顶（z-index）；默认网格 skatch 占位 + 行高按需压缩
+  （卡多时可见行数自适应，零重叠）；卡片最大高度 ≤ 屏幕一半；
+- **对账**：单例、托盘四项菜单（显示/设置服务地址…/设置快捷键…/退出）、config.json
+  持久化、启动兜底重试（根治间歇性空白）、IPC 失败错误可见；
+- **anm-core**：新增 `MoveDir` 原语；其余零改动。
+
+### 部署
+
+- 101 环境重置（用户 hanqi → tony）：deploy.sh / deploy-front.sh 路径已更新，
+  正式目录 `C:\Users\tony\anm-tauri\` + 桌面副本同步（exe + dll + renderer）；
+- 交叉编译产物需与 exe 同目录部署 `WebView2Loader.dll`（动态 loader）；
+- 调试端口 9222 保留（内网诊断用）。
+
+# anm 开发日志
+
 > 记录架构讨论、开发进度与变更。最新条目在顶部。---
 
 ## 2026-08-25 — v2.5（win32 版最终归档）：skatch 卡片/编辑器 + 拖动/预览 + RichEdit + 跨平台重构
