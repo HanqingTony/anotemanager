@@ -1,9 +1,0 @@
-[package]
-name = "anm-tray-core"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-anm-core = { path = "../anm-core" }
-anyhow.workspace = true
-serde_json.workspace = true
