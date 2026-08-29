@@ -33,8 +33,15 @@ struct TrayConfig {
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(|p| std::path::PathBuf::from(p).join("anm-tauri").join("config.json"))
+    // Windows：%APPDATA%/anm-tauri/config.json
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return Some(std::path::PathBuf::from(appdata).join("anm-tauri").join("config.json"));
+    }
+    // Linux：$XDG_CONFIG_HOME/anm-tauri/config.json（缺省 ~/.config）
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    Some(base.join("anm-tauri").join("config.json"))
 }
 
 fn load_config() -> TrayConfig {
@@ -297,8 +304,16 @@ fn open_with_default_handler(path: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-fn open_with_default_handler(_path: &str) -> bool {
-    false
+fn open_with_default_handler(path: &str) -> bool {
+    // Linux：xdg-open 系统默认方式打开（无 UI 错误提示，失败返回非零）
+    std::process::Command::new("xdg-open")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| true)
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +401,9 @@ pub fn run() {
             anm_open_path
         ])
         .setup(|app| {
-            // 外部前端：navigate 到 http://anm.localhost/index.html（免编译迭代模式）。
+            // 外部前端：navigate 到自定义协议页面（免编译迭代模式）。
+            // 平台 URL 形态：Windows = http://anm.localhost（虚拟主机名），
+            // Linux/macOS = anm://localhost（自定义 scheme）。
             // exe 内嵌的 frontend-shell 仅是启动瞬间的透明占位壳。
             if let Some(win) = app.get_webview_window("main") {
                 let exists = std::env::current_exe()
@@ -395,7 +412,12 @@ pub fn run() {
                     .map(|p| p.exists())
                     .unwrap_or(false);
                 if exists {
-                    if let Ok(url) = "http://anm.localhost/index.html".parse::<tauri::Url>() {
+                    let url_str = if cfg!(windows) {
+                        "http://anm.localhost/index.html"
+                    } else {
+                        "anm://localhost/index.html"
+                    };
+                    if let Ok(url) = url_str.parse::<tauri::Url>() {
                         let _ = win.navigate(url);
                     }
                 }

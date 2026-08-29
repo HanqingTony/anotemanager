@@ -18,8 +18,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
-        "visible": true,
-        "additionalBrowserArgs": "--force-device-scale-factor=1 --remote-debugging-port=9222 --remote-allow-origins=*"
+        "visible": true
       }
     ],
     "security": {
@@ -29,6 +28,8 @@
   "bundle": {
     "active": false,
     "targets": [],
-    "icon": ["icons/anm.ico"]
+    "icon": [
+      "icons/anm.ico"
+    ]
   }
 }

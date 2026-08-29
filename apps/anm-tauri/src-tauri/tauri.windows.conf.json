@@ -1,0 +1,18 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "anm",
+        "fullscreen": true,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": true,
+        "additionalBrowserArgs": "--force-device-scale-factor=1 --remote-debugging-port=9222 --remote-allow-origins=*"
+      }
+    ]
+  }
+}
