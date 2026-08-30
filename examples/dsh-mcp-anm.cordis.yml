@@ -1,0 +1,29 @@
+# anm MCP 接入 DSH（deepseek-harness）的 Cordis overlay。
+# 启用（二选一）：
+#   dsh web --patch "$PWD/examples/dsh-mcp-anm.cordis.yml"
+#   或合并进 $DSH_HOME/cordis.patch.yml（全 profile 持久生效）
+#
+# 生效后：工具以 mcp__anm__<tool> 暴露（ls_dirs/list_tags/read_note/...），
+# 且握手 instructions 自动携带 fact.md 全文（agent 无需主动读取）。
+#
+# 模式一：stdio（DSH 直接拉起 anm-core，无需常驻服务）
+- insert:
+    - id: mcp-anm
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: anm
+        transport: stdio
+        command: /home/tony/zrepo/anotemanager/target/debug/anm-core
+        args: [--stdio]
+        cwd: !!js process.cwd()
+
+# 模式二：streamable-http（anm-core 常驻，连回环端点）
+# 注意：必须用回环地址 127.0.0.1:17371（rmcp 的 Host 白名单校验只认回环；
+# LAN 入口 192.168.0.102:17372 经 nginx 改 Host 后也可用）
+# - insert:
+#     - id: mcp-anm
+#       name: '@deepseek-ai/dsh-mcp-client'
+#       config:
+#         serverName: anm
+#         transport: streamable-http
+#         url: http://127.0.0.1:17371/mcp
