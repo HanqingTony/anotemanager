@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>anm 插件示例</title>
+<style>
+  body {
+    margin: 0; height: 100vh; overflow: hidden;
+    background: #161a22;
+    color: #d6dae2;
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  }
+  h1 { color: #5fbeff; font-size: 22px; margin: 0; }
+  p { color: #8f96a3; font-size: 14px; margin: 0; }
+  button {
+    padding: 8px 22px; border-radius: 8px; border: 1px solid #444a55;
+    background: #22252c; color: #d6dae2; font-size: 14px; cursor: pointer;
+  }
+  button:hover { border-color: #5fbeff; color: #5fbeff; }
+  #out { color: #f5c86e; font-size: 13px; min-height: 20px; }
+</style>
+</head>
+<body>
+  <h1>anm 插件示例</h1>
+  <p>本页面与主面板同源（custom protocol），可直接调用 anm IPC。</p>
+  <button id="btn">测试 anm IPC（overview）</button>
+  <div id="out"></div>
+  <script>
+    // 同源 iframe：window.__TAURI__ 可用（与主面板同一 origin）
+    document.getElementById('btn').onclick = async () => {
+      try {
+        const core = window.__TAURI__ && window.__TAURI__.core;
+        if (!core) { document.getElementById('out').textContent = '__TAURI__ 不可用'; return; }
+        const r = await core.invoke('anm_ipc', { cmd: 'overview', params: {} });
+        const n = r && r.data ? r.data.length : 0;
+        document.getElementById('out').textContent = 'overview 返回 ' + n + ' 个一级目录 ✓';
+      } catch (e) {
+        document.getElementById('out').textContent = 'IPC 错误: ' + e;
+      }
+    };
+  </script>
+</body>
+</html>
