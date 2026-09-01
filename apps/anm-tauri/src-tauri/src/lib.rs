@@ -24,12 +24,25 @@ use tauri::{Emitter, Manager, State};
 // 配置
 // ---------------------------------------------------------------------------
 
-/// 持久化配置（%APPDATA%/anm-tauri/config.json）。
+/// 插件注册（设置菜单管理：URL 引入，未来不再内置）。
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct PluginCfg {
+    id: String,
+    name: String,
+    url: String,
+    /// 插件页面快捷键（可选，如 "Alt+Shift+1"）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hotkey: Option<String>,
+}
+
+/// 持久化配置（%APPDATA%/anm-tauri/config.json 或 ~/.config/anm-tauri/）。
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct TrayConfig {
     server_addr: Option<String>,
     server_token: Option<String>,
     hotkey: Option<String>,
+    #[serde(default)]
+    plugins: Vec<PluginCfg>,
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -73,6 +86,8 @@ struct AppState {
     hotkey: Mutex<Option<String>>,
     /// 当前注册的 Shortcut（重设时先 unregister）
     hotkey_shortcut: Mutex<Option<tauri_plugin_global_shortcut::Shortcut>>,
+    /// 插件快捷键：id -> Shortcut（注销/重设用）
+    plugin_shortcuts: Mutex<Vec<(String, tauri_plugin_global_shortcut::Shortcut)>>,
 }
 
 const DEFAULT_HOTKEY: &str = "Alt+Shift+Z";
@@ -94,6 +109,7 @@ impl Default for AppState {
             ),
             hotkey: Mutex::new(Some(cfg.hotkey.unwrap_or_else(|| DEFAULT_HOTKEY.to_string()))),
             hotkey_shortcut: Mutex::new(None),
+            plugin_shortcuts: Mutex::new(Vec::new()),
         }
     }
 }
@@ -170,9 +186,65 @@ fn anm_ipc(state: State<AppState>, cmd: String, params: Option<serde_json::Value
     tcp_call(&addr, token.as_deref(), &cmd, params.as_ref())
 }
 
-/// 设置服务地址 / 令牌并持久化（前端设置对话框用）。
+// 同步插件快捷键：注销被删/无热键的，注册新增/更新的（按下 = 显示窗口 + 通知前端激活插件）
+fn sync_plugin_shortcuts(app: &tauri::AppHandle, plugins: &[PluginCfg]) {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+    let state = app.state::<AppState>();
+    let mut registered = state.plugin_shortcuts.lock().unwrap();
+    // 注销已不在列表中的
+    registered.retain(|(id, sc)| {
+        let keep = plugins.iter().any(|p| &p.id == id);
+        if !keep {
+            let _ = app.global_shortcut().unregister(sc.clone());
+        }
+        keep
+    });
+    for p in plugins {
+        let existing = registered.iter().position(|(id, _)| id == &p.id);
+        match (&p.hotkey, existing) {
+            (Some(hk), Some(idx)) => {
+                // 更新：注销旧键，注册新键
+                if let Ok(sc) = tauri_plugin_global_shortcut::Shortcut::from_str(hk) {
+                    let (_, old) = registered.remove(idx);
+                    let _ = app.global_shortcut().unregister(old);
+                    let pid = p.id.clone();
+                    let _ = app.global_shortcut().on_shortcut(sc.clone(), move |app, _sc, event| {
+                        if event.state == ShortcutState::Pressed {
+                            if let Some(win) = app.get_webview_window("main") {
+                                show_main(&win);
+                            }
+                            let _ = app.emit("anm-plugin-activate", pid.clone());
+                        }
+                    });
+                    registered.push((p.id.clone(), sc));
+                }
+            }
+            (Some(hk), None) => {
+                if let Ok(sc) = tauri_plugin_global_shortcut::Shortcut::from_str(hk) {
+                    let pid = p.id.clone();
+                    let _ = app.global_shortcut().on_shortcut(sc.clone(), move |app, _sc, event| {
+                        if event.state == ShortcutState::Pressed {
+                            if let Some(win) = app.get_webview_window("main") {
+                                show_main(&win);
+                            }
+                            let _ = app.emit("anm-plugin-activate", pid.clone());
+                        }
+                    });
+                    registered.push((p.id.clone(), sc));
+                }
+            }
+            (None, Some(idx)) => {
+                let (_, old) = registered.remove(idx);
+                let _ = app.global_shortcut().unregister(old);
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+/// 设置服务地址 / 令牌 / 插件列表并持久化（前端设置对话框用）。
 #[tauri::command]
-fn anm_set_config(state: State<AppState>, cfg: Option<serde_json::Value>) -> IpcResp {
+fn anm_set_config(app: tauri::AppHandle, state: State<AppState>, cfg: Option<serde_json::Value>) -> IpcResp {
     let mut save = load_config();
     if let Some(cfg) = cfg {
         if let Some(addr) = cfg
@@ -191,6 +263,14 @@ fn anm_set_config(state: State<AppState>, cfg: Option<serde_json::Value>) -> Ipc
             *state.token.lock().unwrap() = t.clone();
             save.server_token = t;
         }
+        if let Some(plugins) = cfg.get("plugins").and_then(|v| v.as_array()) {
+            let list: Vec<PluginCfg> = plugins
+                .iter()
+                .filter_map(|p| serde_json::from_value(p.clone()).ok())
+                .collect();
+            save.plugins = list.clone();
+            sync_plugin_shortcuts(&app, &list);
+        }
     }
     save_config(&save);
     ok(serde_json::json!({ "ok": true, "addr": state.addr.lock().unwrap().clone() }))
@@ -203,6 +283,7 @@ fn anm_get_config(state: State<AppState>) -> IpcResp {
         "addr": state.addr.lock().unwrap().clone(),
         "token": state.token.lock().unwrap().clone().unwrap_or_default(),
         "hotkey": state.hotkey.lock().unwrap().clone().unwrap_or_else(|| DEFAULT_HOTKEY.to_string()),
+        "plugins": load_config().plugins,
     }))
 }
 
@@ -422,6 +503,9 @@ pub fn run() {
                     }
                 }
             }
+
+            // 插件快捷键（配置里带 hotkey 的插件）
+            sync_plugin_shortcuts(app.handle(), &load_config().plugins);
 
             // 全局热键（配置的或默认）
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
