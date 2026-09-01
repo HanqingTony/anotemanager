@@ -1,5 +1,14 @@
 {
   "plugins": [
-    { "id": "demo", "name": "示例插件", "path": "plugins/demo/index.html" }
+    {
+      "id": "alooplayer",
+      "name": "Aloo播放器",
+      "path": "plugins/alooplayer/index.html"
+    },
+    {
+      "id": "demo",
+      "name": "示例插件",
+      "path": "plugins/demo/index.html"
+    }
   ]
 }
