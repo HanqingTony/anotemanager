@@ -43,30 +43,9 @@
   }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: #6ec87f; display: inline-block; margin-right: 6px; }
   #cards { position: absolute; inset: 0; }
-  /* 插件标签栏（顶部，状态栏下方） */
-  #plugin-bar {
-    position: fixed; top: 34px; left: 0; right: 0;
-    height: 32px;
-    display: none; align-items: center;
-    padding: 0 14px; gap: 8px;
-    z-index: 150;
-  }
-  #plugin-bar .p-tab {
-    padding: 4px 14px; border-radius: 7px 7px 0 0;
-    border: 1px solid var(--card-border); border-bottom: none;
-    background: rgba(34, 37, 44, 0.9);
-    color: var(--text-dim); font-size: 13px;
-    cursor: pointer; font-family: inherit;
-  }
-  #plugin-bar .p-tab:hover { color: var(--text); }
-  #plugin-bar .p-tab.active {
-    background: var(--card); color: var(--accent);
-    border-color: #5a6270;
-  }
-  #plugin-bar .p-tab-main { background: rgba(30, 33, 40, 0.9); }
-  /* 插件容器：iframe 铺满（标签栏之下、卡片之上） */
+  /* 插件容器：iframe 铺满（卡片之上） */
   #plugin-views {
-    position: fixed; top: 66px; left: 0; right: 0; bottom: 0;
+    position: fixed; top: 34px; left: 0; right: 0; bottom: 0;
     display: none; z-index: 50;
   }
   #plugin-views iframe {
@@ -184,18 +163,24 @@
     min-height: 12px;
   }
   #result.err { color: #ff7878; }
-  /* 左下角设置按钮 */
-  #settings-btn {
+  /* 底部工具栏：设置 + 插件按钮一排（从左向右扩展） */
+  #bottom-bar {
     position: fixed; left: 18px; bottom: 24px;
-    z-index: 100;
-    padding: 7px 16px;
+    display: flex; align-items: center; gap: 8px;
+    z-index: 150;
+  }
+  .b-btn {
+    padding: 8px 14px;
     background: var(--input-bg);
     border: 1px solid var(--card-border); border-radius: 10px;
     color: var(--text-dim); font-size: 13px;
     cursor: pointer; font-family: inherit;
     box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+    display: flex; align-items: center; gap: 6px;
+    white-space: nowrap;
   }
-  #settings-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .b-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .b-btn.active { border-color: var(--accent); color: var(--accent); background: var(--card); }
   .hidden { display: none !important; }
   /* toast：右上角小窗自动隐藏 */
   #toast {
@@ -246,12 +231,11 @@
     <span><i id="dot"></i><span id="status-text">连接中…</span></span>
     <span id="hotkey-text"></span>
   </div>
-  <div id="plugin-bar">
-    <button class="p-tab p-tab-main active" id="p-tab-main" data-plugin="__main__">主面板</button>
+  <div id="bottom-bar">
+    <button class="b-btn" id="settings-btn" title="设置（服务地址 / 快捷键 / fact.md）">⚙ 设置</button>
   </div>
   <div id="plugin-views"></div>
   <div id="cards"></div>
-  <button id="settings-btn" title="设置（服务地址 / 快捷键 / fact.md）">⚙ 设置</button>
   <div id="inputbar">
     <input id="cmd" placeholder="回车写入 skatch…（/help 查看命令）" autocomplete="off">
     <div id="result"></div>
@@ -984,7 +968,7 @@ cardsEl.addEventListener('mousedown', (e) => {
 });
 
 // ---------- 插件系统（标签栏 + iframe 容器，纯前端） ----------
-const pluginBar = document.getElementById('plugin-bar');
+const pluginBar = document.getElementById('bottom-bar');
 const pluginViews = document.getElementById('plugin-views');
 const pluginFrames = {};   // id -> iframe 元素
 let activePlugin = null;   // 当前激活的插件 id（null = 主面板）
@@ -1002,10 +986,9 @@ function activatePlugin(id) {
   // 切走主面板时编辑器若开着，先自动保存退出（避免状态残留）
   if (id !== null && editingPath) closeEditor(true);
   activePlugin = id;
-  // 标签态（主面板 id 用 '__main__'）
-  const cur = id === null ? '__main__' : id;
-  document.querySelectorAll('#plugin-bar .p-tab').forEach((b) => {
-    b.classList.toggle('active', b.dataset.plugin === cur);
+  // 按钮态（主面板 = 全部不亮）
+  document.querySelectorAll('#bottom-bar .b-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.plugin === id);
   });
   // 视图显隐：主面板 vs 插件 iframe
   setMainVisible(id === null);
@@ -1025,10 +1008,11 @@ async function loadPlugins() {
     for (const p of manifest.plugins) {
       if (!p.id || !p.path) continue;
       const tab = document.createElement('button');
-      tab.className = 'p-tab';
+      tab.className = 'b-btn';
       tab.textContent = p.name || p.id;
       tab.dataset.plugin = p.id;
-      tab.onclick = () => activatePlugin(p.id);
+      // 点击已激活的插件按钮 = 回主面板（toggle）
+      tab.onclick = () => activatePlugin(p.id === activePlugin ? null : p.id);
       pluginBar.appendChild(tab);
       const frame = document.createElement('iframe');
       frame.src = p.path; // 相对路径：自动解析到本 origin（Windows http://anm.localhost / Linux anm://localhost）
@@ -1043,8 +1027,6 @@ async function loadPlugins() {
   }
 }
 
-// 主面板标签
-document.getElementById('p-tab-main').onclick = () => activatePlugin(null);
 
 // 插件激活时 Esc 先回主面板（不隐藏窗口）
 document.addEventListener('keydown', (e) => {
