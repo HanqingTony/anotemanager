@@ -162,24 +162,24 @@
     min-height: 12px;
   }
   #result.err { color: #ff7878; }
-  /* 底部工具栏：设置 + 插件按钮一排（从左向右扩展） */
+  /* 底部工具栏：贴左下角的方框按钮一排（设置 | 主面板 | 插件…） */
   #bottom-bar {
-    position: fixed; left: 18px; bottom: 24px;
-    display: flex; align-items: center; gap: 8px;
+    position: fixed; left: 0; bottom: 0;
+    display: flex; align-items: stretch; gap: 0;
     z-index: 150;
   }
   .b-btn {
-    padding: 8px 14px;
+    padding: 9px 16px;
     background: var(--input-bg);
-    border: 1px solid var(--card-border); border-radius: 10px;
+    border: 1px solid var(--card-border); border-radius: 0;
     color: var(--text-dim); font-size: 13px;
     cursor: pointer; font-family: inherit;
-    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
     display: flex; align-items: center; gap: 6px;
     white-space: nowrap;
   }
-  .b-btn:hover { border-color: var(--accent); color: var(--accent); }
-  .b-btn.active { border-color: var(--accent); color: var(--accent); background: var(--card); }
+  .b-btn + .b-btn { margin-left: -1px; } /* 相邻边框重叠成一条线 */
+  .b-btn:hover { border-color: var(--accent); color: var(--accent); z-index: 1; }
+  .b-btn.active { border-color: var(--accent); color: var(--accent); background: var(--card); z-index: 1; }
   .hidden { display: none !important; }
   /* toast：右上角小窗自动隐藏 */
   #toast {
@@ -231,8 +231,8 @@
     <span id="hotkey-text"></span>
   </div>
   <div id="bottom-bar">
-    <button class="b-btn" id="main-panel-btn" data-plugin="__main__" title="主面板">主面板</button>
     <button class="b-btn" id="settings-btn" title="设置（服务地址 / 快捷键 / fact.md）">⚙ 设置</button>
+    <button class="b-btn" id="main-panel-btn" data-plugin="__main__" title="主面板">主面板</button>
   </div>
   <div id="plugin-views"></div>
   <div id="cards"></div>
