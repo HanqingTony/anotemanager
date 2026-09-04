@@ -12,7 +12,7 @@ HOST=tony@192.168.0.101
 EXE=apps/anm-tauri/src-tauri/target/x86_64-pc-windows-gnu/release/anm-tauri.exe
 LOADER=apps/anm-tauri/WebView2Loader.dll
 RENDERER=apps/anm-tauri/renderer
-DEST=/mnt/c/Users/hanqi/anm-tauri
+DEST=/mnt/c/Users/tony/anm-tauri
 
 if [ ! -f "$EXE" ]; then
   echo "未找到 $EXE，先构建"; exit 1
@@ -30,14 +30,14 @@ timeout 60 ssh "$HOST" "
   cp /tmp/anm-tauri.exe $DEST/anm-tauri.exe
   cp /tmp/WebView2Loader.dll $DEST/WebView2Loader.dll
   # exe/dll 同步桌面副本（此前只同步 renderer，桌面 exe 停留在旧版）
-  mkdir -p '/mnt/c/Users/hanqi/Desktop/anm-tauri-desktop'
-  cp /tmp/anm-tauri.exe '/mnt/c/Users/hanqi/Desktop/anm-tauri-desktop/anm-tauri.exe'
-  cp /tmp/WebView2Loader.dll '/mnt/c/Users/hanqi/Desktop/anm-tauri-desktop/WebView2Loader.dll'
+  mkdir -p '/mnt/c/Users/tony/Desktop/anm-tauri-desktop'
+  cp /tmp/anm-tauri.exe '/mnt/c/Users/tony/Desktop/anm-tauri-desktop/anm-tauri.exe'
+  cp /tmp/WebView2Loader.dll '/mnt/c/Users/tony/Desktop/anm-tauri-desktop/WebView2Loader.dll'
   rm -rf $DEST/renderer
   cp -r /tmp/anm-renderer $DEST/renderer
   # 同步桌面副本（用户从桌面启动）
-  rm -rf '/mnt/c/Users/hanqi/Desktop/anm-tauri-desktop/renderer'
-  cp -r /tmp/anm-renderer '/mnt/c/Users/hanqi/Desktop/anm-tauri-desktop/renderer'
+  rm -rf '/mnt/c/Users/tony/Desktop/anm-tauri-desktop/renderer'
+  cp -r /tmp/anm-renderer '/mnt/c/Users/tony/Desktop/anm-tauri-desktop/renderer'
   cd $DEST
   setsid nohup ./anm-tauri.exe > /tmp/anm-tauri-run.log 2>&1 < /dev/null & disown
   sleep 10
