@@ -1,3 +1,28 @@
+## 2026-09-05 — 纯前端化第一步：anm-core 人机 HTTP API + 前端双通道
+
+> 方向（作者确认）：anm 前端纯前端化（浏览器可直接跑），壳能力由 atray/浏览器提供，
+> anm-tauri 薄壳可退役。本条目记录第一步落地。
+
+### anm-core：人机 HTTP API（`crates/anm-core/src/http_api.rs`）
+
+- **`POST /api/ipc`**：信封协议与 TCP IPC 完全同构（`{"token","request"}` → `{"ok","data"}`），
+  复用 `dispatch`/`check_token`（同权限同白名单，含全部读写命令）
+- 默认端口 **17373**（`ANM_HTTP_API_PORT` 覆盖），绑定 host 同 `[server] host`
+- CORS 放行（浏览器跨源 fetch）+ 令牌鉴权（信封内，与 TCP 一致）——内网宽松模式（§17 语义不变）
+- MCP HTTP（17371）不受影响；TCP IPC（17370）不受影响
+
+### renderer：双通道（Tauri 内 invoke / 纯浏览器 fetch）
+
+- `inTauri` 检测：有 `__TAURI__` → invoke（薄壳模式原样）；无 → fetch `http://<serverAddr-host>:17373/api/ipc`
+- 壳能力（hide/setHotkey/事件）浏览器模式 no-op 降级
+- 浏览器模式无头实测：15 张卡片渲染、状态正常、零 JS 错误
+
+### 说明
+
+- anm-tauri（Tauri 模式）不受影响，照常部署使用
+- 浏览器访问：静态托管 renderer 目录（nginx / 任意静态服务器 / atray 注册）
+- 下一步（未排期）：静态托管落地、anm-tauri 退役评估
+
 # anm 开发日志
 
 > 记录架构讨论、开发进度与变更。最新条目在顶部。
