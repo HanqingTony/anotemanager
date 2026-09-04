@@ -12,6 +12,7 @@
 //! - `anm-core --stdio`：只跑一个 MCP stdio 会话（被 MCP 客户端 spawn）；
 //! - `anm-core --http [--host H] [--port P]`：覆盖 MCP HTTP 地址后启动完整服务。
 
+mod http_api;
 mod mcp;
 mod server;
 mod watch;
@@ -77,11 +78,19 @@ async fn run_service(cfg: Config, mcp_host: String, mcp_port: u16) -> Result<()>
             eprintln!("anm-core: MCP HTTP 退出: {e:#}");
         }
     });
+    // 4. 人机 HTTP API（浏览器前端通道，独立 tokio 任务）
+    let api_cfg = cfg.clone();
+    let api_handle = tokio::spawn(async move {
+        if let Err(e) = http_api::run_http(api_cfg).await {
+            eprintln!("anm-core: HTTP API 退出: {e:#}");
+        }
+    });
 
     // 任一个常驻任务结束（异常或 Ctrl-C）即结束进程；监听线程随进程退出
     tokio::select! {
         _ = ipc_handle => {}
         _ = http_handle => {}
+        _ = api_handle => {}
     }
     drop(watch_handle);
     Ok(())

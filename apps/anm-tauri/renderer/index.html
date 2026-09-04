@@ -324,18 +324,59 @@
 <script>
 'use strict';
 // ---------- 初始化（Tauri v2 桥：invoke 自定义命令 + event listen） ----------
+// 双通道：Tauri 薄壳内（window.__TAURI__ 存在）走 invoke；
+// 纯浏览器（纯前端 webapp）走 anm-core 人机 HTTP API（17373）。
+// HTTP 服务地址：由 serverAddr 的主机名推导（http://<host>:17373/api/ipc）。
 const anmApi = (() => {
-  const core = window.__TAURI__.core;
-  const evt = window.__TAURI__.event;
+  const inTauri = typeof window.__TAURI__ !== 'undefined' && !!window.__TAURI__.core;
+  const httpApiPort = 17373; // anm-core 人机 HTTP API 端口
+
+  async function httpIpc(cmd, params) {
+    const host = (serverAddr || '192.168.0.102:17370').split(':')[0];
+    const req = { cmd };
+    const hasParams = params && !(typeof params === 'object' && Object.keys(params).length === 0);
+    if (hasParams) req.params = params;
+    try {
+      const resp = await fetch('http://' + host + ':' + httpApiPort + '/api/ipc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: serverToken, request: req }),
+      });
+      const data = await resp.json();
+      if (data.ok) return { status: 'ok', data: data.data };
+      return { status: 'error', data: data.error || '服务错误' };
+    } catch (e) {
+      return { status: 'error', data: '无法连接 anm-core HTTP (' + host + ':' + httpApiPort + '): ' + e.message };
+    }
+  }
+
+  if (inTauri) {
+    const core = window.__TAURI__.core;
+    const evt = window.__TAURI__.event;
+    return {
+      ipc: (cmd, params) => core.invoke('anm_ipc', { cmd, params: params || {} }),
+      setConfig: (cfg) => core.invoke('anm_set_config', { cfg }),
+      getConfig: () => core.invoke('anm_get_config'),
+      setHotkey: (keys) => core.invoke('anm_set_hotkey', { keys }),
+      hide: () => core.invoke('anm_hide'),
+      openPath: (path) => core.invoke('anm_open_path', { path }),
+      onEvent: (cb) => { evt.listen('anm-event', (e) => cb(e.payload)); },
+      onMenu: (cb) => { evt.listen('anm-menu', (e) => cb(e.payload)); },
+      onPluginActivate: (cb) => { evt.listen('anm-plugin-activate', (e) => cb(e.payload)); },
+    };
+  }
+  // 纯浏览器模式：无 IPC 转发命令可调，仅 ipc 走 HTTP；
+  // 其余壳能力（隐藏/系统事件）由承载容器提供，缺失时静默降级。
   return {
-    ipc: (cmd, params) => core.invoke('anm_ipc', { cmd, params: params || {} }),
-    setConfig: (cfg) => core.invoke('anm_set_config', { cfg }),
-    getConfig: () => core.invoke('anm_get_config'),
-    setHotkey: (keys) => core.invoke('anm_set_hotkey', { keys }),
-    hide: () => core.invoke('anm_hide'),
-    openPath: (path) => core.invoke('anm_open_path', { path }),
-    onEvent: (cb) => { evt.listen('anm-event', (e) => cb(e.payload)); },
-    onMenu: (cb) => { evt.listen('anm-menu', (e) => cb(e.payload)); },
+    ipc: httpIpc,
+    setConfig: () => Promise.resolve({ status: 'ok', data: { ok: true } }),
+    getConfig: () => Promise.resolve({ status: 'ok', data: { addr: serverAddr, hotkey: '' } }),
+    setHotkey: () => Promise.resolve({ status: 'error', data: '浏览器模式不支持' }),
+    hide: () => Promise.resolve({ status: 'ok', data: { ok: true } }),
+    openPath: () => Promise.resolve({ status: 'error', data: '浏览器模式不支持' }),
+    onEvent: () => {},
+    onMenu: () => {},
+    onPluginActivate: () => {},
   };
 })();
 
@@ -1097,7 +1138,6 @@ async function loadPlugins() {
 }
 
 // 插件页面快捷键：按下直接呼出该插件
-anmApi.onPluginActivate = (cb) => { window.__TAURI__.event.listen('anm-plugin-activate', (e) => cb(e.payload)); };
 anmApi.onPluginActivate((id) => {
   if (!pluginFrames[id]) return;
   showOverlay();

@@ -73,7 +73,7 @@ async fn write_response(writer: &mut (impl AsyncWriteExt + Unpin), resp: Respons
 
 /// 令牌校验：`[server] token` 未配置时放行；配置后要求请求令牌完全一致。
 /// 比较使用常数时间（防时序侧信道——未来对公网暴露时同样适用）。
-fn check_token(cfg: &Config, presented: Option<&str>) -> Result<(), String> {
+pub(crate) fn check_token(cfg: &Config, presented: Option<&str>) -> Result<(), String> {
     match &cfg.server.token {
         None => Ok(()),
         Some(expected) => {
@@ -103,7 +103,7 @@ fn check_token(cfg: &Config, presented: Option<&str>) -> Result<(), String> {
 ///
 /// 不涉及任何语义判断（anm-core 不感知场景概念）；失败时返回
 /// `ok: false` 的响应，由客户端展示错误。
-fn dispatch(cfg: &Config, req: Request) -> Response {
+pub(crate) fn dispatch(cfg: &Config, req: Request) -> Response {
     match exec(cfg, req) {
         Ok(data) => Response::ok(data),
         Err(e) => Response::err(format!("{e:#}")),
