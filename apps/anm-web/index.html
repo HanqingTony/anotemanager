@@ -254,15 +254,11 @@
 </head>
 <body>
 <div id="overlay">
+  <button class="b-btn" id="settings-btn" title="设置（服务地址 / 令牌 / fact.md）" style="position: fixed; left: 0; bottom: 0; z-index: 150;">⚙ 设置</button>
   <div id="topbar">
     <span><i id="dot"></i><span id="status-text">连接中…</span></span>
     <span id="hotkey-text"></span>
   </div>
-  <div id="bottom-bar">
-    <button class="b-btn" id="settings-btn" title="设置（服务地址 / 快捷键 / fact.md）">⚙ 设置</button>
-    <button class="b-btn" id="main-panel-btn" data-plugin="__main__" title="主面板">主面板</button>
-  </div>
-  <div id="plugin-views"></div>
   <div id="cards"></div>
   <div id="inputbar">
     <input id="cmd" placeholder="回车写入 skatch…（/help 查看命令）" autocomplete="off">
@@ -286,18 +282,12 @@
   <div id="settings-mask">
     <div id="settings-box">
       <h3>设置</h3>
-      <div id="s-menu">
-        <button class="s-menu-item active" data-menu="addr">服务地址</button>
-        <button class="s-menu-item" data-menu="hotkey">快捷键</button>
-        <button class="s-menu-item" data-menu="plugins">插件管理</button>
-      </div>
       <div id="s-body">
-        <div class="s-page" id="s-page-addr">
-          <label>服务地址（主机:端口）</label>
-          <input id="s-addr" spellcheck="false">
-          <label>访问令牌（可选）</label>
-          <input id="s-token" spellcheck="false" type="password">
-        </div>
+        <label>服务地址（anm-core HTTP API：主机:端口）</label>
+        <input id="s-addr" spellcheck="false">
+        <label>访问令牌（可选，与服务端 [server] token 一致）</label>
+        <input id="s-token" spellcheck="false" type="password">
+      </div>
         <div class="s-page hidden" id="s-page-hotkey">
           <label>全局快捷键（按下新组合：Alt/Ctrl/Shift + 键）</label>
           <div id="hotkey-hint" tabindex="0">（等待按键…）</div>
@@ -324,66 +314,44 @@
 <script>
 'use strict';
 // ---------- 初始化（Tauri v2 桥：invoke 自定义命令 + event listen） ----------
-// 双通道：Tauri 薄壳内（window.__TAURI__ 存在）走 invoke；
-// 纯浏览器（纯前端 webapp）走 anm-core 人机 HTTP API（17373）。
-// HTTP 服务地址：由 serverAddr 的主机名推导（http://<host>:17373/api/ipc）。
-const anmApi = (() => {
-  const inTauri = typeof window.__TAURI__ !== 'undefined' && !!window.__TAURI__.core;
-  const httpApiPort = 17373; // anm-core 人机 HTTP API 端口
-
-  async function httpIpc(cmd, params) {
-    const host = (serverAddr || '192.168.0.102:17370').split(':')[0];
-    const req = { cmd };
-    const hasParams = params && !(typeof params === 'object' && Object.keys(params).length === 0);
-    if (hasParams) req.params = params;
-    try {
-      const resp = await fetch('http://' + host + ':' + httpApiPort + '/api/ipc', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: serverToken, request: req }),
-      });
-      const data = await resp.json();
-      if (data.ok) return { status: 'ok', data: data.data };
-      return { status: 'error', data: data.error || '服务错误' };
-    } catch (e) {
-      return { status: 'error', data: '无法连接 anm-core HTTP (' + host + ':' + httpApiPort + '): ' + e.message };
-    }
-  }
-
-  if (inTauri) {
-    const core = window.__TAURI__.core;
-    const evt = window.__TAURI__.event;
-    return {
-      ipc: (cmd, params) => core.invoke('anm_ipc', { cmd, params: params || {} }),
-      setConfig: (cfg) => core.invoke('anm_set_config', { cfg }),
-      getConfig: () => core.invoke('anm_get_config'),
-      setHotkey: (keys) => core.invoke('anm_set_hotkey', { keys }),
-      hide: () => core.invoke('anm_hide'),
-      openPath: (path) => core.invoke('anm_open_path', { path }),
-      onEvent: (cb) => { evt.listen('anm-event', (e) => cb(e.payload)); },
-      onMenu: (cb) => { evt.listen('anm-menu', (e) => cb(e.payload)); },
-      onPluginActivate: (cb) => { evt.listen('anm-plugin-activate', (e) => cb(e.payload)); },
-    };
-  }
-  // 纯浏览器模式：无 IPC 转发命令可调，仅 ipc 走 HTTP；
-  // 其余壳能力（隐藏/系统事件）由承载容器提供，缺失时静默降级。
-  return {
-    ipc: httpIpc,
-    setConfig: () => Promise.resolve({ status: 'ok', data: { ok: true } }),
-    getConfig: () => Promise.resolve({ status: 'ok', data: { addr: serverAddr, hotkey: '' } }),
-    setHotkey: () => Promise.resolve({ status: 'error', data: '浏览器模式不支持' }),
-    hide: () => Promise.resolve({ status: 'ok', data: { ok: true } }),
-    openPath: () => Promise.resolve({ status: 'error', data: '浏览器模式不支持' }),
-    onEvent: () => {},
-    onMenu: () => {},
-    onPluginActivate: () => {},
-  };
-})();
-
 // ---------- 配置 ----------
-let serverAddr = localStorage.getItem('anm.serverAddr') || '192.168.0.102:17370';
+let serverAddr = localStorage.getItem('anm.serverAddr') || '192.168.0.102:17373'; // anm-core HTTP API 地址
 let serverToken = localStorage.getItem('anm.serverToken') || null;
-let serverRoot = null;   // anm-core 笔记库根（skatch 命令返回），远程路径显示用
+let serverRoot = null;   // anm-core 笔记库根（skatch 命令返回）
+
+// ---------- anm-web：纯浏览器，直连 anm-core 人机 HTTP API ----------
+// API 地址：设置里配置（默认 192.168.0.102:17373，host:port 格式）
+
+async function httpIpc(cmd, params) {
+  const apiAddr = serverAddr || '192.168.0.102:17373';
+  const req = { cmd };
+  const hasParams = params && !(typeof params === 'object' && Object.keys(params).length === 0);
+  if (hasParams) req.params = params;
+  try {
+    const resp = await fetch('http://' + apiAddr + '/api/ipc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: serverToken, request: req }),
+    });
+    const data = await resp.json();
+    if (data.ok) return { status: 'ok', data: data.data };
+    return { status: 'error', data: data.error || '服务错误' };
+  } catch (e) {
+    return { status: 'error', data: '无法连接 anm-core (' + apiAddr + '): ' + e.message };
+  }
+}
+
+const anmApi = {
+  ipc: httpIpc,
+  setConfig: () => Promise.resolve({ status: 'ok', data: { ok: true } }),
+  getConfig: () => Promise.resolve({ status: 'ok', data: { addr: serverAddr } }),
+  setHotkey: () => Promise.resolve({ status: 'error', data: '浏览器模式不支持' }),
+  hide: () => Promise.resolve({ status: 'ok', data: { ok: true } }),
+  openPath: () => Promise.resolve({ status: 'error', data: '浏览器模式不支持' }),
+  onEvent: () => {},
+  onMenu: () => {},
+  onPluginActivate: () => {},
+};
 
 // ---------- IPC 转发 ----------
 function anmIpc(cmd, params) {
@@ -1012,34 +980,13 @@ function showResult(text, isErr) {
   resultEl.className = isErr ? 'err' : '';
 }
 
-// ---------- 事件 ----------
-anmApi.onEvent((event) => {
-  if (event === 'shown') {
-    renderCards();
-  }
-  if (event === 'hidden') {
-    // 窗口隐藏（win32 版"取消激活"语义）：退出编辑器（自动保存/改名）→
-    // 清空临时状态（临时子卡片 / 新建模式 / 结果 / 设置对话框）
-    if (editingPath) closeEditor(true);
-    closeSettings();
-    cardModels = [];
-    cardsEl.innerHTML = '';
-    if (newNoteDir) cancelNewNote();
-    resultEl.textContent = '';
-  }
-});
-
+// ---------- 视图 ----------
 function showOverlay() {
   document.getElementById('overlay').style.display = 'flex';
   renderCards();
 }
-
-// 点击空白取消激活（点击输入框 / 卡片 / 编辑器之外）
+// 点击编辑器遮罩背景（非编辑器本身）→ 保存并退出
 document.getElementById('overlay').addEventListener('mousedown', (e) => {
-  if (e.target === document.getElementById('overlay') || e.target === cardsEl) {
-    anmApi.hide();
-  }
-  // 点击编辑器遮罩背景（非编辑器本身）→ 保存并退出
   if (e.target === document.getElementById('editor-mask')) {
     closeEditor(true);
   }
@@ -1052,331 +999,46 @@ cardsEl.addEventListener('mousedown', (e) => {
   e.preventDefault();
 });
 
-// ---------- 插件系统（config 驱动：设置菜单管理，URL 引入） ----------
-const pluginBar = document.getElementById('bottom-bar');
-const pluginViews = document.getElementById('plugin-views');
-let pluginFrames = {};   // id -> iframe 元素
-let pluginCfgs = [];     // [{id, name, url, hotkey}]
-let activePlugin = null; // 当前激活的插件 id（null = 主面板）
-
-// 主面板显隐（插件激活时隐藏；iframe 不销毁，状态保持）
-function setMainVisible(vis) {
-  const hidden = !vis;
-  document.getElementById('cards').style.display = hidden ? 'none' : '';
-  document.getElementById('inputbar').style.display = hidden ? 'none' : '';
-  document.getElementById('editor-mask').style.display = hidden ? 'none' : '';
-  // 底部工具栏（主面板/设置/插件）所有面板共用，不隐藏
-}
-
-function activatePlugin(id) {
-  // 切走主面板时编辑器若开着，先自动保存退出（避免状态残留）
-  if (id !== null && editingPath) closeEditor(true);
-  activePlugin = id;
-  // 按钮态（主面板用 '__main__' 标识）
-  const cur = id === null ? '__main__' : id;
-  document.querySelectorAll('#bottom-bar .b-btn').forEach((b) => {
-    b.classList.toggle('active', b.dataset.plugin === cur);
-  });
-  // 视图显隐：主面板 vs 插件 iframe
-  setMainVisible(id === null);
-  pluginViews.style.display = id === null ? 'none' : 'block';
-  for (const [pid, frame] of Object.entries(pluginFrames)) {
-    frame.style.display = pid === id ? 'block' : 'none';
-  }
-}
-
-// 重建底部按钮与 iframe（插件配置变化后调用）
-function buildPluginUI() {
-  pluginBar.querySelectorAll('.b-btn[data-plugin]').forEach((b) => b.remove());
-  pluginViews.innerHTML = '';
-  pluginFrames = {};
-  for (const p of pluginCfgs) {
-    if (!p.id || !p.url) continue;
-    const tab = document.createElement('button');
-    tab.className = 'b-btn';
-    tab.textContent = p.name || p.id;
-    tab.dataset.plugin = p.id;
-    tab.title = p.url + (p.hotkey ? '（热键 ' + p.hotkey + '）' : '');
-    // 点击已激活的插件按钮 = 回主面板（toggle）
-    tab.onclick = () => activatePlugin(p.id === activePlugin ? null : p.id);
-    pluginBar.appendChild(tab);
-    const frame = document.createElement('iframe');
-    frame.src = p.url;
-    frame.style.display = 'none';
-    frame.setAttribute('data-plugin', p.id);
-    pluginViews.appendChild(frame);
-    pluginFrames[p.id] = frame;
-  }
-  pluginBar.style.display = pluginCfgs.length ? 'flex' : 'none';
-}
-
-// 加载插件（config 驱动；首次从 manifest.json 迁移旧内置插件）
-async function loadPlugins() {
-  try {
-    const r = await anmApi.getConfig();
-    if (r.status === 'ok' && r.data.plugins && r.data.plugins.length) {
-      pluginCfgs = r.data.plugins;
-    } else {
-      // 迁移：manifest.json（旧内置插件）→ 注册进 config，此后 config 为准
-      try {
-        const resp = await fetch('plugins/manifest.json');
-        if (resp.ok) {
-          const m = await resp.json();
-          if (m.plugins && m.plugins.length) {
-            pluginCfgs = m.plugins.map((p) => ({
-              id: p.id,
-              name: p.name,
-              url: location.origin + '/' + String(p.path).replace(/^\.?\//, ''),
-            }));
-            await anmApi.setConfig({ plugins: pluginCfgs });
-          }
-        }
-      } catch (e) { /* 无 manifest 则保持空 */ }
-    }
-  } catch (e) {}
-  buildPluginUI();
-}
-
-// 插件页面快捷键：按下直接呼出该插件
-anmApi.onPluginActivate((id) => {
-  if (!pluginFrames[id]) return;
-  showOverlay();
-  activatePlugin(id);
-});
-
-// 插件激活时 Esc 先回主面板（不隐藏窗口）
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && activePlugin !== null) {
-    activatePlugin(null);
-    e.stopPropagation();
-  }
-});
-
-// ---------- 设置菜单（服务地址 / 快捷键 / 插件管理） ----------
+// ---------- 设置（服务地址 / 令牌 / fact.md） ----------
 const settingsMask = document.getElementById('settings-mask');
-let settingsMode = 'addr';
-let pendingHotkey = null;        // 待确认组合（规范化字符串）
-let pendingPluginHotkeyId = null; // 正在设置快捷键的插件 id
 
-function normalizeHotkey(parts) {
-  // parts: 修饰符数组 + 主键；输出 Alt+Shift+Z 形式
-  const mods = [];
-  if (parts.alt) mods.push('Alt');
-  if (parts.ctrl) mods.push('Ctrl');
-  if (parts.shift) mods.push('Shift');
-  const key = parts.key;
-  if (!key) return null;
-  return mods.concat(key).join('+');
-}
-
-// 菜单切换
-function switchMenu(menu) {
-  settingsMode = menu;
-  document.querySelectorAll('#s-menu .s-menu-item').forEach((b) => {
-    b.classList.toggle('active', b.dataset.menu === menu);
-  });
-  document.getElementById('s-page-addr').classList.toggle('hidden', menu !== 'addr');
-  document.getElementById('s-page-hotkey').classList.toggle('hidden', menu !== 'hotkey');
-  document.getElementById('s-page-plugins').classList.toggle('hidden', menu !== 'plugins');
-  if (menu === 'addr') {
-    document.getElementById('s-addr').value = serverAddr;
-    document.getElementById('s-token').value = serverToken || '';
-    document.getElementById('s-addr').focus();
-  } else if (menu === 'hotkey') {
-    document.getElementById('hotkey-hint').focus();
-  } else if (menu === 'plugins') {
-    renderPluginList();
-  }
-}
-
-function openSettings(mode) {
-  switchMenu(mode || 'addr');
-  pendingHotkey = null;
-  pendingPluginHotkeyId = null;
-  document.getElementById('hotkey-err').textContent = '';
-  document.getElementById('hotkey-hint').textContent = '（等待按键…）';
+function openSettings() {
+  document.getElementById('s-addr').value = serverAddr;
+  document.getElementById('s-token').value = serverToken || '';
   settingsMask.style.display = 'flex';
+  document.getElementById('s-addr').focus();
 }
 function closeSettings() {
   settingsMask.style.display = 'none';
-  pendingPluginHotkeyId = null;
 }
-
 async function applySettings() {
-  if (settingsMode === 'addr') {
-    const addr = document.getElementById('s-addr').value.trim();
-    const token = document.getElementById('s-token').value.trim();
-    if (!addr) { showToast('服务地址不能为空'); return; }
-    serverAddr = addr;
-    serverToken = token || null;
-    localStorage.setItem('anm.serverAddr', serverAddr);
-    localStorage.setItem('anm.serverToken', serverToken || '');
-    await anmApi.setConfig({addr: serverAddr, token: serverToken});
-    showToast('服务地址已更新：' + serverAddr);
-    closeSettings();
-    renderCards();
-  } else if (settingsMode === 'hotkey') {
-    if (!pendingHotkey) { showToast('请先按下新组合键'); return; }
-    const r = await anmApi.setHotkey(pendingHotkey);
-    if (r.status === 'ok') {
-      showToast('快捷键已更新：' + pendingHotkey);
-      document.getElementById('hotkey-text').textContent = '热键 ' + pendingHotkey;
-      closeSettings();
-    } else {
-      document.getElementById('hotkey-err').textContent = String(r.data || '设置失败');
-    }
-  }
+  const addr = document.getElementById('s-addr').value.trim();
+  const token = document.getElementById('s-token').value.trim();
+  if (!addr) { showToast('服务地址不能为空'); return; }
+  serverAddr = addr;
+  serverToken = token || null;
+  localStorage.setItem('anm.serverAddr', serverAddr);
+  localStorage.setItem('anm.serverToken', serverToken || '');
+  showToast('服务地址已更新：' + serverAddr);
+  closeSettings();
+  renderCards();
 }
-
-// ---------- 插件管理 ----------
-function renderPluginList() {
-  const list = document.getElementById('plugin-list');
-  list.innerHTML = '';
-  if (!pluginCfgs.length) {
-    const empty = document.createElement('div');
-    empty.style.cssText = 'color: var(--text-dim); font-size: 12px; padding: 8px 4px;';
-    empty.textContent = '（暂无插件：输入 URL 添加，或迁移内置插件）';
-    list.appendChild(empty);
-    return;
-  }
-  for (const p of pluginCfgs) {
-    const row = document.createElement('div');
-    row.className = 'plugin-row';
-    const name = document.createElement('span');
-    name.className = 'p-name';
-    name.textContent = p.name || p.id;
-    name.title = p.id;
-    const url = document.createElement('span');
-    url.className = 'p-url';
-    url.textContent = p.url;
-    const hot = document.createElement('span');
-    hot.className = 'p-hot';
-    hot.textContent = p.hotkey || '';
-    const hkBtn = document.createElement('button');
-    hkBtn.className = 'btn';
-    hkBtn.textContent = '快捷键';
-    hkBtn.onclick = () => {
-      pendingPluginHotkeyId = p.id;
-      switchMenu('hotkey');
-      document.getElementById('hotkey-hint').textContent =
-        '为「' + (p.name || p.id) + '」按下组合键（Esc 取消）…';
-      document.getElementById('hotkey-hint').focus();
-    };
-    const delBtn = document.createElement('button');
-    delBtn.className = 'btn';
-    delBtn.textContent = '删除';
-    delBtn.onclick = () => {
-      if (!confirm('删除插件「' + (p.name || p.id) + '」？')) return;
-      pluginCfgs = pluginCfgs.filter((x) => x.id !== p.id);
-      savePlugins();
-    };
-    row.append(name, url, hot, hkBtn, delBtn);
-    list.appendChild(row);
-  }
-}
-
-function savePlugins() {
-  anmApi.setConfig({plugins: pluginCfgs}).then(() => {
-    showToast('插件配置已保存');
-    buildPluginUI();
-    renderPluginList();
-  });
-}
-
-document.getElementById('p-add-btn').onclick = () => {
-  const url = document.getElementById('p-url').value.trim();
-  const name = document.getElementById('p-name').value.trim();
-  if (!url) { showToast('请输入插件 URL'); return; }
-  if (!/^(https?:\/\/|anm:\/\/)/.test(url)) {
-    showToast('URL 需以 http(s):// 或 anm:// 开头');
-    return;
-  }
-  const base = (name || url).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  let id = base || ('p' + Date.now());
-  let i = 2;
-  while (pluginCfgs.some((p) => p.id === id)) id = base + '-' + (i++);
-  pluginCfgs.push({id, name: name || url, url});
-  document.getElementById('p-url').value = '';
-  document.getElementById('p-name').value = '';
-  savePlugins();
-};
-
-// ---------- 绑定 ----------
-document.querySelectorAll('#s-menu .s-menu-item').forEach((b) => {
-  b.onclick = () => switchMenu(b.dataset.menu);
-});
 document.getElementById('s-ok').onclick = applySettings;
 document.getElementById('s-cancel').onclick = closeSettings;
-// 左下角设置按钮：打开设置菜单
-document.getElementById('settings-btn').onclick = () => { showOverlay(); openSettings('addr'); };
-document.getElementById('main-panel-btn').onclick = () => activatePlugin(null);
-// 编辑 fact.md：关闭设置框，用内置编辑器打开（经 IPC 读写，跨机可用）
+document.getElementById('settings-btn').onclick = () => { openSettings(); };
 document.getElementById('s-fact').onclick = () => {
   closeSettings();
   if (!serverRoot) { showToast('无法定位笔记库根目录（skatch 未加载）'); return; }
   openEditor(serverRoot + '/.agentspace/fact.md', null);
 };
-
-// 快捷键捕获：Alt/Ctrl/Shift + 字母/数字/功能键（全局热键 与 插件热键 共用）
-document.getElementById('hotkey-hint').addEventListener('keydown', (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  const parts = {alt: e.altKey, ctrl: e.ctrlKey, shift: e.shiftKey};
-  const k = e.key;
-  const mods = parts.alt || parts.ctrl || parts.shift;
-  if (!mods) return; // 至少一个修饰键
-  if (/^[A-Za-z0-9]$/.test(k)) {
-    parts.key = k.toUpperCase();
-  } else if (/^F([1-9]|1[0-2])$/.test(k)) {
-    parts.key = k;
-  } else {
-    return; // 忽略纯修饰键
-  }
-  // 纯 Shift+字母 不构成组合（缺少 Alt/Ctrl）
-  if (!parts.alt && !parts.ctrl && parts.shift) return;
-  pendingHotkey = normalizeHotkey(parts);
-  document.getElementById('hotkey-hint').textContent = pendingHotkey;
-  // 插件快捷键模式：捕获后直接保存
-  if (pendingPluginHotkeyId) {
-    const pid = pendingPluginHotkeyId;
-    pendingPluginHotkeyId = null;
-    const p = pluginCfgs.find((x) => x.id === pid);
-    if (p) {
-      p.hotkey = pendingHotkey;
-      savePlugins();
-      switchMenu('plugins');
-      showToast('插件快捷键：' + pendingHotkey);
-    }
-  }
+// 设置面板打开时 Esc 关闭
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && settingsMask.style.display === 'flex') closeSettings();
 });
-document.getElementById('hotkey-hint').addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    e.preventDefault();
-    pendingPluginHotkeyId = null;
-    document.getElementById('hotkey-hint').textContent = '（等待按键…）';
-    document.getElementById('hotkey-err').textContent = '';
-  }
-});
-
-function hideOverlay() {
-  anmApi.hide();
-}
 
 // ---------- 启动 ----------
-window.addEventListener('DOMContentLoaded', async () => {
-  // 服务地址：localStorage 优先（旧版已存 192.168.0.102:17370），首次运行
-  // 无本地配置时用内置默认跨机地址（与旧版一致）。不要用 Rust 侧 getConfig
-  // 的 addr 覆盖——Rust 默认 127.0.0.1 仅用于本机模式，前端默认才是跨机地址。
-  try {
-    const r = await anmApi.getConfig();
-    if (r.status === 'ok') {
-      document.getElementById('hotkey-text').textContent =
-        '热键 ' + (r.data.hotkey || 'Alt+Shift+Z');
-    }
-  } catch (e) {}
-  // 先把地址同步给 Rust（await 保证 renderCards 的 TCP 用对地址）
-  await anmApi.setConfig({ addr: serverAddr, token: serverToken });
-  loadPlugins();
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('hotkey-text').textContent = 'anm-web';
   showOverlay();
   setStatus(true, '已连接 · ' + serverAddr);
   // 时钟心跳：诊断 JS 主线程是否卡死

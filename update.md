@@ -1,3 +1,23 @@
+## 2026-09-05 — anm-tauri 薄壳退役归档（纯前端 anm-web 上线）
+
+> 里程碑：anm 前端纯前端化完成——浏览器直接访问 **http://192.168.0.102:8090** 即得完整笔记 UI
+> （anm-web，apps/anm-web/，纯 HTML 单文件）。壳能力（全屏/热键/托盘）由 atray 或浏览器提供。
+
+### 变更
+
+- **apps/anm-web/**：从 anm-tauri renderer 独立（去薄壳/插件/布局功能，保留卡片/编辑器/
+  输入框/斜杠命令/拖放/skatch；设置 = HTTP API 地址 + 令牌 + fact.md 编辑）；
+  直连 anm-core 人机 HTTP API（POST /api/ipc，端口 17373，CORS 放行）
+- **nginx**：192.168.0.102:8090 → /var/www/anm-web（deploy-web.sh 同步；注意文件 644）
+- **归档**：apps/anm-tauri 删除（git tag `anm-tauri-final` 保留最终状态）；
+  101 上的 anm-tauri 实例不再需要（可用 atray 承载 anm-web 或浏览器直访）
+- anm-core：新增 http_api.rs（人机 HTTP API，Envelope 同构 TCP IPC）
+
+### 使用
+
+- 浏览器打开 http://192.168.0.102:8090（首次可在左下角设置里改 API 地址/令牌）
+- 全屏 + 热键需求：把 http://192.168.0.102:8090 注册进 atray 的 web 应用
+
 ## 2026-09-05 — 纯前端化第一步：anm-core 人机 HTTP API + 前端双通道
 
 > 方向（作者确认）：anm 前端纯前端化（浏览器可直接跑），壳能力由 atray/浏览器提供，
