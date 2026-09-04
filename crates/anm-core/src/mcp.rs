@@ -325,25 +325,18 @@ impl AnmServer {
     }
 }
 
-// 基础指引 + fact.md 全文：agent 加载本 MCP 即自动知道全部通用事实
-// （不依赖 agent 主动读取 resource——"自动知道"的落地方式）。
-// fact.md 现场读取，永远以当前内容为准。
-fn build_instructions(cfg: &Config) -> String {
-    let base = "anm 笔记系统记忆总线（anm-core 内置）：按标签/目录/内容检索笔记，写入 inbox，新增标签、整理标签行位置。所有 path/dir 参数仅在笔记库根目录内有效；对已有内容的修改/删除仅在作者显式指令下进行。";
-    let facts_path = cfg.root.join(".agentspace").join("fact.md");
-    match std::fs::read_to_string(&facts_path) {
-        Ok(content) => format!(
-            "{base}\n\n===== 通用事实（fact.md 全文，人工维护、默认只读、以当前内容为准）=====\n{content}"
-        ),
-        Err(_) => base.to_string(),
-    }
+// 渐进式披露：instructions 只给使用指引，不注入 fact.md 全文。
+// 需要用户信息（设备/网络/凭据/项目上下文）时，由 agent 主动读取资源
+// anm://facts（人工维护、只读、永远以当前文件内容为准）——避免敏感信息
+// 常驻上下文与全量指令污染。
+fn build_instructions(_cfg: &Config) -> String {
+    "anm 笔记系统记忆总线（anm-core 内置）：按标签/目录/内容检索笔记，写入 inbox，新增标签、整理标签行位置。所有 path/dir 参数仅在笔记库根目录内有效；对已有内容的修改/删除仅在作者显式指令下进行。\n\n当需要用户个人信息时（设备/网络拓扑、凭据索引、当前项目、服务器地址等），请读取资源 anm://facts 获取——不要假设、不要编造，需要什么就查什么。".to_string()
 }
 
 #[tool_handler(name = "anm-core")]
 impl ServerHandler for AnmServer {
-    /// 手动实现 get_info（宏检测到已有则不自动生成）：instructions 动态
-    /// 携带 fact.md 全文——MCP 客户端在握手/初始化时即获得，agent 无需
-    /// 主动读取 resource 就能"自动知道"全部通用事实。
+    /// 手动实现 get_info（宏检测到已有则不自动生成）：instructions 提供
+    /// 使用指引；通用事实按需读取（渐进式披露，不全量注入）。
     fn get_info(&self) -> rmcp::model::ServerInfo {
         use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
         let instructions = self
