@@ -283,7 +283,7 @@
     <div id="settings-box">
       <h3>设置</h3>
       <div id="s-body">
-        <label>服务地址（anm-core HTTP API：主机:端口）</label>
+        <label>服务地址（留空 = 同源统一入口 18101；跨机访问填 主机:18101）</label>
         <input id="s-addr" spellcheck="false">
         <label>访问令牌（可选，与服务端 [server] token 一致）</label>
         <input id="s-token" spellcheck="false" type="password">
@@ -315,7 +315,7 @@
 'use strict';
 // ---------- 初始化（Tauri v2 桥：invoke 自定义命令 + event listen） ----------
 // ---------- 配置 ----------
-let serverAddr = localStorage.getItem('anm.serverAddr') || '192.168.0.102:17373'; // anm-core HTTP API 地址
+let serverAddr = localStorage.getItem('anm.serverAddr') || ''; // 留空=同源 18101；填 host:port 跨机
 let serverToken = localStorage.getItem('anm.serverToken') || null;
 let serverRoot = null;   // anm-core 笔记库根（skatch 命令返回）
 
@@ -323,12 +323,14 @@ let serverRoot = null;   // anm-core 笔记库根（skatch 命令返回）
 // API 地址：设置里配置（默认 192.168.0.102:17373，host:port 格式）
 
 async function httpIpc(cmd, params) {
-  const apiAddr = serverAddr || '192.168.0.102:17373';
+  // 服务地址留空 = 同源（/api/ipc，统一入口 18101）；填 host:port 可跨机直连
+  const apiBase = (serverAddr || '').trim();
+  const url = apiBase ? ('http://' + apiBase + '/api/ipc') : '/api/ipc';
   const req = { cmd };
   const hasParams = params && !(typeof params === 'object' && Object.keys(params).length === 0);
   if (hasParams) req.params = params;
   try {
-    const resp = await fetch('http://' + apiAddr + '/api/ipc', {
+    const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: serverToken, request: req }),
@@ -337,7 +339,7 @@ async function httpIpc(cmd, params) {
     if (data.ok) return { status: 'ok', data: data.data };
     return { status: 'error', data: data.error || '服务错误' };
   } catch (e) {
-    return { status: 'error', data: '无法连接 anm-core (' + apiAddr + '): ' + e.message };
+    return { status: 'error', data: '无法连接 anm-core (' + url + '): ' + e.message };
   }
 }
 
